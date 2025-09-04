@@ -1,0 +1,15 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# Install Node.js via NVM
+RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh | bash \
+    && export NVM_DIR="$HOME/.nvm" \
+    && [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" \
+    && nvm install ${NODE_VERSION} \
+    && nvm use ${NODE_VERSION} \
+    && nvm alias default ${NODE_VERSION} \
+    && npm install -g yarn
+
+# Add Node.js to PATH
+ENV PATH="/root/.nvm/versions/node/v${NODE_VERSION}/bin:${PATH}"
+{{ end }}

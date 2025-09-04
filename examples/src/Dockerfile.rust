@@ -1,0 +1,21 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# Architecture-specific Rust installation
+RUN case "${TARGETARCH}" in \
+    amd64) RUST_ARCH="x86_64-unknown-linux-gnu" ;; \
+    arm64) RUST_ARCH="aarch64-unknown-linux-gnu" ;; \
+    *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+       --default-toolchain ${RUST_VERSION} \
+       --target ${RUST_ARCH} \
+       -y \
+    && echo 'source ~/.cargo/env' >> ~/.bashrc
+
+# Add cargo to PATH
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Install common Rust tools
+RUN ~/.cargo/bin/cargo install cargo-edit cargo-watch
+{{ end }}

@@ -1,0 +1,24 @@
+FROM {{ .FROM }}
+
+# Common labels
+{{ range $key, $value := .Labels }}
+LABEL {{ $key }}="{{ $value }}"
+{{ end }}
+
+# Build arguments - including platform info
+ARG TARGETPLATFORM
+ARG TARGETOS  
+ARG TARGETARCH
+ARG BUILDPLATFORM
+
+{{ range $key, $value := .Args }}
+ARG {{ $key }}={{ $value }}
+{{ end }}
+
+# Environment variables
+{{ range $key, $value := .Envs }}
+ENV {{ $key }}={{ $value }}
+{{ end }}
+
+# Image-specific content
+{{ template "content" . }}
