@@ -35,6 +35,15 @@ archives:
       {{- else }}{{ .Arch }}{{ end }}
       {{- if .Arm }}v{{ .Arm }}{{ end }}
 
+release:
+  gitea:
+    owner: rawmind
+    name: arbor
+
+gitea_urls:
+  api: https://codeberg.org/api/v1
+  download: https://codeberg.org
+
 checksum:
   name_template: 'checksums.txt'
 
