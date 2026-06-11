@@ -1,0 +1,27 @@
+FROM ubuntu:22.04
+
+# Common labels
+LABEL image.name="web-base"
+LABEL image.version="1.0.0"
+LABEL project="multisource-example"
+
+# Build arguments - including platform info
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDPLATFORM
+ARG NODE_VERSION=20
+
+# Environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Web stack root: install the Node ${NODE_VERSION} runtime the web apps inherit.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && npm install -g serve \
+    && rm -rf /var/lib/apt/lists/*
+
+
+
+

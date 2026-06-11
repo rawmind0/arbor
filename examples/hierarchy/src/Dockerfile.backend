@@ -1,0 +1,7 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# Backend app: FROM nodejs (inherits the Node runtime). Express-style API.
+EXPOSE ${PORT}
+CMD ["sh", "-c", "node -e \"require('http').createServer((_,r)=>r.end('ok')).listen(${PORT})\""]
+{{ end }}

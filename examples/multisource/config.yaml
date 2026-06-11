@@ -1,0 +1,32 @@
+config:
+  builder: docker
+  workers: 4
+  architectures:
+    - linux/amd64
+  dockerfiles:
+    source: examples/multisource/src
+    destination: examples/multisource/build
+  labels:
+    project: multisource-example
+
+# Each --sources file is loaded as its own independent hierarchy. This main file
+# holds the "web" stack; services.yaml holds the "api" stack. Load both with:
+#   arbor plan --config examples/multisource/config.yaml \
+#     --sources 'examples/multisource/services.yaml'
+images:
+  web-base:
+    version: 1.0.0
+    base_image: ubuntu:22.04
+    envs:
+      DEBIAN_FRONTEND: noninteractive
+    args:
+      NODE_VERSION: "20"
+    images:
+      site:            # FROM web-base
+        version: 1.0.0
+        envs:
+          PORT: "3000"
+      admin:           # FROM web-base
+        version: 1.0.0
+        envs:
+          PORT: "3001"

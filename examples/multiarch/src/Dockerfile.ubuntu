@@ -1,0 +1,8 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# Base OS layer (root). Built once per architecture by the multi-arch build.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+{{ end }}

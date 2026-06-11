@@ -1,0 +1,24 @@
+FROM library/web-base:1.0.0
+
+# Common labels
+LABEL image.name="admin"
+LABEL image.parent="web-base"
+LABEL image.version="1.0.0"
+LABEL project="multisource-example"
+
+# Build arguments - including platform info
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDPLATFORM
+
+# Environment variables
+ENV PORT=3001
+
+# Admin panel: FROM web-base (inherits the Node runtime).
+EXPOSE ${PORT}
+CMD ["sh", "-c", "serve -s /admin -l ${PORT}"]
+
+
+
+

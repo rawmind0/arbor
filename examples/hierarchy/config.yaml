@@ -1,0 +1,59 @@
+config:
+  builder: docker
+  workers: 4
+  architectures:
+    - linux/amd64
+  dockerfiles:
+    source: examples/hierarchy/src
+    destination: examples/hierarchy/build
+  # Owner namespaces every image tag (acme/ubuntu:..., acme/nodejs:...), locally
+  # and when pushed. Single-arch images build and load locally without a push.
+  registry:
+    owner: acme
+  labels:
+    project: hierarchy-example
+
+# A layered hierarchy (APP_FLOW.md §5): a single base OS root, runtime layers
+# that inherit it and install a runtime, and apps that inherit a runtime.
+# Only the root sets base_image; every child's FROM resolves to its parent.
+images:
+  ubuntu:
+    version: 22.04.0
+    base_image: ubuntu:22.04
+    envs:
+      DEBIAN_FRONTEND: noninteractive
+    labels:
+      layer: os
+    images:
+      # Node runtime: FROM ubuntu, installs Node ${NODE_VERSION}.
+      nodejs:
+        version: 20.0.0
+        args:
+          NODE_VERSION: "20"
+        labels:
+          layer: runtime
+        images:
+          frontend:            # FROM nodejs
+            version: 1.0.0
+            envs:
+              PORT: "3000"
+            labels:
+              layer: app
+          backend:             # FROM nodejs
+            version: 1.0.0
+            envs:
+              PORT: "8080"
+            labels:
+              layer: app
+      # Go runtime: FROM ubuntu, installs Go ${GO_VERSION} per architecture.
+      golang:
+        version: 1.23.5
+        args:
+          GO_VERSION: "1.23.5"
+        labels:
+          layer: runtime
+        images:
+          worker:              # FROM golang
+            version: 1.0.0
+            labels:
+              layer: app

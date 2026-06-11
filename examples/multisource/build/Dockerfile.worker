@@ -1,0 +1,23 @@
+FROM library/api-base:1.0.0
+
+# Common labels
+LABEL image.name="worker"
+LABEL image.parent="api-base"
+LABEL image.version="1.0.0"
+LABEL project="multisource-example"
+
+# Build arguments - including platform info
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDPLATFORM
+
+# Background worker: FROM api-base (inherits the Go runtime).
+WORKDIR /src
+RUN printf 'package main\nimport("fmt";"time")\nfunc main(){for{fmt.Println("job");time.Sleep(time.Second)}}\n' > main.go \
+    && go build -o /usr/local/bin/worker main.go
+CMD ["worker"]
+
+
+
+

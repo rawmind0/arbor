@@ -1,0 +1,36 @@
+config:
+  builder: docker
+  workers: 4
+  # Multi-arch images can't be loaded locally (a manifest list), so the whole
+  # hierarchy is pushed to a registry. Building this for real needs credentials:
+  #   REGISTRY_USERNAME=... REGISTRY_PASSWORD=... \
+  #     arbor build --config examples/multiarch/config.yaml
+  push: true
+  registry:
+    url: registry.example.com
+    owner: myorg
+  architectures:
+    - linux/amd64
+    - linux/arm64
+  dockerfiles:
+    source: examples/multiarch/src
+    destination: examples/multiarch/build
+  labels:
+    project: multiarch-example
+
+# Same layered model as the hierarchy example, built for multiple architectures.
+# The Go runtime installs the correct toolchain per platform via $TARGETARCH.
+images:
+  ubuntu:
+    version: 22.04.0
+    base_image: ubuntu:22.04
+    envs:
+      DEBIAN_FRONTEND: noninteractive
+    images:
+      golang:
+        version: 1.23.5
+        args:
+          GO_VERSION: "1.23.5"
+        images:
+          app:
+            version: 1.0.0

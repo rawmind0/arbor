@@ -16,9 +16,6 @@ func TestNewChangeDetector(t *testing.T) {
 	}
 
 	detector := NewChangeDetector(cfg, "/tmp")
-	if detector == nil {
-		t.Error("Expected detector to be created")
-	}
 	if detector.config != cfg {
 		t.Error("Expected detector to have reference to config")
 	}

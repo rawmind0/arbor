@@ -1,0 +1,9 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# Worker app: FROM golang (inherits the Go runtime). Builds a tiny binary.
+WORKDIR /src
+RUN printf 'package main\nimport("fmt";"time")\nfunc main(){for{fmt.Println("tick");time.Sleep(time.Second)}}\n' > main.go \
+    && go build -o /usr/local/bin/worker main.go
+CMD ["worker"]
+{{ end }}

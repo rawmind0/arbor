@@ -1,0 +1,7 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# Base layer: shared runtime deps every child inherits.
+RUN apk add --no-cache ca-certificates tini
+ENTRYPOINT ["/sbin/tini", "--"]
+{{ end }}

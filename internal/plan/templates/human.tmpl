@@ -1,0 +1,71 @@
+╔═══════════════════════════════════════════════════════════════╗
+║                      BUILD PLAN                               ║
+╚═══════════════════════════════════════════════════════════════╝
+
+📋 METADATA
+───────────
+  Version:      {{.Metadata.Version}}
+  Generated:    {{rfc3339 .Metadata.Generated}}
+  Config:       {{.Metadata.ConfigFile}}
+  Builder:      {{.Metadata.Builder}}
+  Workers:      {{.Metadata.Workers}}
+  Total Images: {{.Metadata.TotalImages}}
+{{- with .Metadata.GitInfo}}
+
+  Git Info:
+    Branch:   {{.Branch}}
+    Clean:    {{.IsClean}}
+{{- if .BaseRef}}
+    Base Ref: {{.BaseRef}}
+{{- end}}
+{{- end}}
+{{if .Login}}
+🔑 REGISTRY LOGIN
+────────────────
+{{- range .Login}}
+  {{join . " "}}
+{{- end}}
+{{end}}
+🎯 EXECUTION QUEUES
+──────────────────
+{{- range .Queues}}
+
+  Queue: {{.ID}}
+  ──────────
+{{- range $i, $b := .Batches}}
+    Batch {{add $i 1}}: {{join $b.Tasks ", "}}{{if gt (len $b.Tasks) 1}} (parallel tasks){{end}}
+{{- end}}
+{{- end}}
+
+🔨 BUILD COMMANDS
+────────────────
+{{- range $q := .Queues}}
+
+  📁 Queue: {{$q.ID}}
+  ────────────
+{{- range $bi, $b := $q.Batches}}
+
+    📦 Batch {{add $bi 1}}
+    ─────────
+{{- range $b.Tasks}}
+{{- with commandFor $q .}}
+      Image:    {{.ImageTag}}
+      Arch:     {{.Architecture}}
+      Dockerfile: {{.DockerfilePath}}
+{{- if .BuildArgs}}
+      Build Args:
+{{- range $k, $v := .BuildArgs}}
+        {{$k}}={{$v}}
+{{- end}}
+{{- end}}
+{{- if and .Labels (le (len .Labels) 3)}}
+      Labels:
+{{- range $k, $v := .Labels}}
+        {{$k}}={{$v}}
+{{- end}}
+{{- end}}
+      Command: {{join .Command " "}}
+{{- end}}
+{{- end}}
+{{- end}}
+{{- end}}

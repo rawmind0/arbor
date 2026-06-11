@@ -1,0 +1,26 @@
+FROM acme/nodejs:20.0.0
+
+# Common labels
+LABEL image.name="frontend"
+LABEL image.parent="nodejs"
+LABEL image.version="1.0.0"
+LABEL layer="app"
+LABEL project="hierarchy-example"
+
+# Build arguments - including platform info
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDPLATFORM
+
+# Environment variables
+ENV PORT=3000
+
+# Frontend app: FROM nodejs (inherits the Node runtime). Serves a static build.
+RUN npm install -g serve
+EXPOSE ${PORT}
+CMD ["sh", "-c", "serve -s /app -l ${PORT}"]
+
+
+
+

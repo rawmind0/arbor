@@ -1,0 +1,27 @@
+FROM library/api-base:1.0.0
+
+# Common labels
+LABEL image.name="api"
+LABEL image.parent="api-base"
+LABEL image.version="1.0.0"
+LABEL project="multisource-example"
+
+# Build arguments - including platform info
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDPLATFORM
+
+# Environment variables
+ENV PORT=8080
+
+# API service: FROM api-base (inherits the Go runtime).
+WORKDIR /src
+RUN printf 'package main\nimport("fmt";"net/http";"os")\nfunc main(){http.HandleFunc("/",func(w http.ResponseWriter,_ *http.Request){fmt.Fprint(w,"ok")});http.ListenAndServe(":"+os.Getenv("PORT"),nil)}\n' > main.go \
+    && go build -o /usr/local/bin/api main.go
+EXPOSE ${PORT}
+CMD ["api"]
+
+
+
+

@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/rawmind0/container-builder/internal/git"
+	"github.com/rs/zerolog/log"
+
+	"github.com/rawmind0/arbor/internal/git"
 )
 
 // ChangeDetector handles detection of changes in configuration and templates
@@ -26,14 +28,14 @@ func NewChangeDetector(cfg *Config, workDir string) *ChangeDetector {
 func (cd *ChangeDetector) DetectChanges(baseRef string) error {
 	// If not in a git repo, mark all images as changed
 	if !cd.gitClient.IsGitRepo() {
-		fmt.Println("Not in a git repository - building all images")
+		log.Info().Msg("not in a git repository - building all images")
 		cd.markAllImagesChanged()
 		return nil
 	}
 
 	// If no commits exist, mark all images as changed
 	if !cd.gitClient.HasCommits() {
-		fmt.Println("No commits found - building all images")
+		log.Info().Msg("no commits found - building all images")
 		cd.markAllImagesChanged()
 		return nil
 	}
@@ -53,7 +55,7 @@ func (cd *ChangeDetector) DetectChanges(baseRef string) error {
 		if len(changedFiles) == 0 {
 			changedFiles, err = cd.gitClient.GetChangedFiles("HEAD~1")
 			if err != nil {
-				fmt.Printf("Warning: failed to detect changes (%v) - building all images\n", err)
+				log.Warn().Err(err).Msg("failed to detect changes - building all images")
 				cd.markAllImagesChanged()
 				return nil
 			}
@@ -66,11 +68,11 @@ func (cd *ChangeDetector) DetectChanges(baseRef string) error {
 	}
 
 	if len(changedFiles) == 0 {
-		fmt.Println("No changes detected")
+		log.Info().Msg("no changes detected")
 		return nil
 	}
 
-	fmt.Printf("Detected %d changed files\n", len(changedFiles))
+	log.Info().Int("count", len(changedFiles)).Msg("detected changed files")
 
 	// Analyze changed files and mark affected images
 	cd.analyzeChangedFiles(changedFiles)
@@ -101,20 +103,20 @@ func (cd *ChangeDetector) analyzeChangedFiles(changedFiles []string) {
 		// Check if config file changed
 		if strings.HasSuffix(file, "config.yaml") || strings.HasSuffix(file, "config.yml") {
 			configChanged = true
-			fmt.Printf("  Config file changed: %s\n", file)
+			log.Debug().Str("file", file).Msg("config file changed")
 			continue
 		}
 
 		// Check if it's a dockerfile template
 		if cd.isDockerfileTemplate(file) {
 			changedTemplates[file] = true
-			fmt.Printf("  Template changed: %s\n", file)
+			log.Debug().Str("file", file).Msg("template changed")
 		}
 	}
 
 	// If config changed, mark all images as changed
 	if configChanged {
-		fmt.Println("Configuration changed - marking all images for rebuild")
+		log.Info().Msg("configuration changed - marking all images for rebuild")
 		cd.markAllImagesChanged()
 		return
 	}
@@ -153,7 +155,7 @@ func (cd *ChangeDetector) markImagesForChangedTemplatesRecursive(images map[stri
 		for changedFile := range changedTemplates {
 			if changedFile == templatePath || strings.HasSuffix(changedFile, filepath.Base(templatePath)) {
 				img.Changed = true
-				fmt.Printf("  Marking image '%s' as changed due to template: %s\n", name, changedFile)
+				log.Debug().Str("image", name).Str("template", changedFile).Msg("marking image as changed")
 				break
 			}
 		}

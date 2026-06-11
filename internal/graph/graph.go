@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/rawmind0/container-builder/internal/config"
+	"github.com/rawmind0/arbor/internal/config"
 )
 
+// Node is one image (all of its architectures). Architecture is no longer a
+// graph dimension — img.Architectures lists the platforms the image builds for.
 type Node struct {
 	Image        *config.ImageConfig
-	Architecture string
-	ImageTag     string
+	ImageTag     string // name:version (the manifest tag for multi-arch)
 	Dependencies []*Node
 	Dependents   []*Node
 	Level        int
@@ -30,7 +31,7 @@ func NewGraph(cfg *config.Config) *Graph {
 }
 
 func (g *Graph) Build() error {
-	// Create nodes for each image-architecture combination
+	// Create one node per image (architectures live on the image)
 	g.createNodes(g.config.Images, "")
 
 	// Build dependencies
@@ -46,17 +47,14 @@ func (g *Graph) Build() error {
 
 func (g *Graph) createNodes(images map[string]*config.ImageConfig, parent string) {
 	for name, img := range images {
-		for _, arch := range img.Architectures {
-			node := &Node{
-				Image:        img,
-				Architecture: arch,
-				ImageTag:     g.buildImageTag(img, arch),
-				Dependencies: []*Node{},
-				Dependents:   []*Node{},
-				Changed:      img.Changed,
-			}
-			g.Nodes = append(g.Nodes, node)
+		node := &Node{
+			Image:        img,
+			ImageTag:     g.buildImageTag(img),
+			Dependencies: []*Node{},
+			Dependents:   []*Node{},
+			Changed:      img.Changed,
 		}
+		g.Nodes = append(g.Nodes, node)
 
 		// Process child images recursively
 		if img.Images != nil {
@@ -68,8 +66,7 @@ func (g *Graph) createNodes(images map[string]*config.ImageConfig, parent string
 func (g *Graph) buildDependencies() {
 	for _, node := range g.Nodes {
 		if node.Image.Parent != "" {
-			// Find parent node with same architecture
-			parentNode := g.findNode(node.Image.Parent, node.Architecture)
+			parentNode := g.findNode(node.Image.Parent)
 			if parentNode != nil {
 				node.Dependencies = append(node.Dependencies, parentNode)
 				parentNode.Dependents = append(parentNode.Dependents, node)
@@ -133,21 +130,22 @@ func (g *Graph) calculateLevels() error {
 	return nil
 }
 
-func (g *Graph) findNode(imageName, arch string) *Node {
+func (g *Graph) findNode(imageName string) *Node {
 	for _, node := range g.Nodes {
-		if node.Image.Name == imageName && node.Architecture == arch {
+		if node.Image.Name == imageName {
 			return node
 		}
 	}
 	return nil
 }
 
-func (g *Graph) buildImageTag(img *config.ImageConfig, arch string) string {
-	archSuffix := ""
-	if arch != "" {
-		archSuffix = "-" + sanitizeArch(arch)
-	}
-	return fmt.Sprintf("%s:%s%s", img.Name, img.Version, archSuffix)
+// buildImageTag returns the canonical, namespace-qualified tag
+// ("[url/]owner/name:version") used everywhere as an image's identity: the
+// build -t target, the FROM reference for child images, batch ids, and
+// reporting. Centralizing on RegistryConfig.Tag keeps local and registry
+// references consistent.
+func (g *Graph) buildImageTag(img *config.ImageConfig) string {
+	return g.config.Config.Registry.Tag(img.Name, img.Version)
 }
 
 func (g *Graph) GetBuildOrder() []*Node {
@@ -216,19 +214,4 @@ func (g *Graph) GetParentImageTag(node *Node) string {
 	// Use parent node's image tag
 	parent := node.Dependencies[0]
 	return parent.ImageTag
-}
-
-func sanitizeArch(arch string) string {
-	switch arch {
-	case "linux/amd64":
-		return "linux-amd64"
-	case "linux/arm64":
-		return "linux-arm64"
-	case "darwin/amd64":
-		return "darwin-amd64"
-	case "darwin/arm64":
-		return "darwin-arm64"
-	default:
-		return arch
-	}
 }

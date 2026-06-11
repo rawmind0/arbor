@@ -1,0 +1,8 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# Base OS layer (root of the hierarchy). Common tooling every descendant gets.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl ca-certificates git xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+{{ end }}

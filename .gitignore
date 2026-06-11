@@ -1,0 +1,88 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when invoked with -html
+*.out
+coverage.out
+coverage.html
+*.cov
+
+# Dependency directories (remove the comment below if you use dep or modules)
+vendor/
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Build directories
+/bin/
+/dist/
+/build/
+/output/
+
+# Goreleaser artifacts
+dist/
+
+# IDE specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Claude Code files
+.claude/
+CLAUDE.md
+.claude-code/
+*.claude
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Debug files
+debug
+debug.test
+*.log
+
+# Temporary files
+*.tmp
+/tmp/
+
+# Project specific
+container-builder
+!cmd/container-builder/
+
+# Generated Dockerfiles (if you want to keep them out of version control)
+# Uncomment if desired:
+# examples/build/
+
+# Local config overrides
+*.local.yaml
+*.local.yml
+
+# Profiling files
+*.prof
+*.mem
+*.cpu
+
+# OS generated files
+Thumbs.db
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Archives
+*.tar.gz
+*.zip
+*.tar
+*.gz

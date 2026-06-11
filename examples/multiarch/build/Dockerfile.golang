@@ -1,0 +1,26 @@
+FROM registry.example.com/myorg/ubuntu:22.04.0
+
+# Common labels
+LABEL image.name="golang"
+LABEL image.parent="ubuntu"
+LABEL image.version="1.23.5"
+LABEL project="multiarch-example"
+
+# Build arguments - including platform info
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+ARG BUILDPLATFORM
+ARG GO_VERSION=1.23.5
+
+# Go runtime layer: FROM ubuntu. Installs Go ${GO_VERSION} for the architecture
+# currently being built ($TARGETOS/$TARGETARCH are set per platform), so the
+# same Dockerfile yields correct amd64 and arm64 layers.
+RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz" \
+    | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+RUN go version
+
+
+
+

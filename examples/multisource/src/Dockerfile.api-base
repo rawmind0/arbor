@@ -1,0 +1,11 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# API stack root: install the Go ${GO_VERSION} runtime (arch-aware) that the api
+# services inherit.
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz" \
+       | tar -C /usr/local -xz \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/go/bin:${PATH}"
+{{ end }}

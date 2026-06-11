@@ -13,6 +13,7 @@ builds:
       - -X main.Version={{.Version}}
       - -X main.Commit={{.Commit}}
       - -X main.Date={{.Date}}
+      - -X main.Platform={{.Os}}/{{.Arch}}
     goos:
       - linux
       - darwin
@@ -22,10 +23,10 @@ builds:
     ignore:
       - goos: darwin
         goarch: amd64
-    binary: container-builder
+    binary: arbor
 
 archives:
-  - format: tar.gz
+  - formats: ["tar.gz"]
     name_template: >-
       {{ .ProjectName }}_
       {{- title .Os }}_
@@ -38,7 +39,7 @@ checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc

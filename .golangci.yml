@@ -1,0 +1,25 @@
+# golangci-lint v2 configuration. Run with `make lint` (or `make lint-fix`).
+version: "2"
+
+linters:
+  # "standard" = errcheck, govet, ineffassign, staticcheck, unused.
+  default: standard
+  enable:
+    - misspell    # typos in comments and strings
+    - unconvert   # unnecessary type conversions
+  exclusions:
+    rules:
+      # Tests routinely ignore errors on purpose (setup writes, cleanup, etc.).
+      - path: _test\.go
+        linters:
+          - errcheck
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      # Group this module's imports into their own block.
+      local-prefixes:
+        - github.com/rawmind0/arbor

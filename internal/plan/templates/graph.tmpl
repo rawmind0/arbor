@@ -1,0 +1,27 @@
+digraph BuildPlan {
+  rankdir=BT;
+  node [shape=box, style=rounded];
+
+{{range .Queues}}{{range .Commands}}  "{{.ImageTag}}" [label="{{.ImageName}}\n{{.Architecture}}"];
+{{end}}{{end -}}
+{{range $qi, $q := .Queues}}
+{{- if gt (len $.Queues) 1}}
+  subgraph cluster_queue_{{$qi}} {
+    label="Queue: {{$q.ID}}";
+    style=filled;
+    color=lightgrey;
+{{- end}}
+{{- range $i, $b := $q.Batches}}
+    subgraph cluster_{{$qi}}_{{$i}} {
+      label="Batch {{add $i 1}}";
+      style=dotted;
+{{- range $b.Tasks}}
+      "{{.}}";
+{{- end}}
+    }
+{{- end}}
+{{- if gt (len $.Queues) 1}}
+  }
+{{- end}}
+{{- end}}
+}

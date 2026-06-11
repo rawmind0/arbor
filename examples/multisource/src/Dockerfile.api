@@ -1,0 +1,10 @@
+{{ template "base" . }}
+
+{{ define "content" }}
+# API service: FROM api-base (inherits the Go runtime).
+WORKDIR /src
+RUN printf 'package main\nimport("fmt";"net/http";"os")\nfunc main(){http.HandleFunc("/",func(w http.ResponseWriter,_ *http.Request){fmt.Fprint(w,"ok")});http.ListenAndServe(":"+os.Getenv("PORT"),nil)}\n' > main.go \
+    && go build -o /usr/local/bin/api main.go
+EXPOSE ${PORT}
+CMD ["api"]
+{{ end }}

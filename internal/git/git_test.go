@@ -189,3 +189,126 @@ func TestIsCleanWorkingTree_NotGitRepo(t *testing.T) {
 		t.Error("IsCleanWorkingTree() should return error for non-git repo")
 	}
 }
+
+// Simple tests without actual git operations
+// Real git operations will be tested in integration tests
+
+func TestGetChangedFiles_Validation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tests := []struct {
+		name    string
+		baseRef string
+		setup   func()
+		wantErr bool
+	}{
+		{
+			name:    "empty base ref uses HEAD",
+			baseRef: "",
+			setup:   func() {},
+			wantErr: true, // Will error if not a git repo
+		},
+		{
+			name:    "valid base ref",
+			baseRef: "HEAD~1",
+			setup:   func() {},
+			wantErr: true, // Will error if not a git repo
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setup != nil {
+				tt.setup()
+			}
+
+			client := NewClient(tmpDir)
+			_, err := client.GetChangedFiles(tt.baseRef)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GetChangedFiles() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestGetUncommittedFiles_Validation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test that it errors when not a git repo
+	client := NewClient(tmpDir)
+	_, err = client.GetUncommittedFiles()
+	if err == nil {
+		t.Error("GetUncommittedFiles() should error for non-git repo")
+	}
+}
+
+func TestGetWorkingDirectory_Validation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test that it errors when not a git repo
+	client := NewClient(tmpDir)
+	_, err = client.GetWorkingDirectory()
+	if err == nil {
+		t.Error("GetWorkingDirectory() should error for non-git repo")
+	}
+}
+
+func TestGetCurrentBranch_Validation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test that it errors when not a git repo
+	client := NewClient(tmpDir)
+	_, err = client.GetCurrentBranch()
+	if err == nil {
+		t.Error("GetCurrentBranch() should error for non-git repo")
+	}
+}
+
+func TestIsCleanWorkingTree_Validation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test that it errors when not a git repo
+	client := NewClient(tmpDir)
+	_, err = client.IsCleanWorkingTree()
+	if err == nil {
+		t.Error("IsCleanWorkingTree() should error for non-git repo")
+	}
+}
+
+func TestHasCommits_Validation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "git-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Test with non-git repo
+	client := NewClient(tmpDir)
+	if client.HasCommits() {
+		t.Error("HasCommits() should return false for non-git repo")
+	}
+}
+
+// All complex git operations will be tested in integration tests
+// Unit tests only verify basic behavior and error handling
