@@ -97,8 +97,8 @@ func (e *Executor) worker(poolCtx context.Context) {
 
 // runSteps runs an ordered sequence of commands, stopping on the first failure,
 // and returns the combined output. Each command inherits the process environment
-// (so registry credentials are visible) plus the task's env.
-func (e *Executor) runSteps(ctx context.Context, steps [][]string, env map[string]string) (string, error) {
+// (so registry credentials are visible).
+func (e *Executor) runSteps(ctx context.Context, steps [][]string) (string, error) {
 	var out strings.Builder
 	for _, step := range steps {
 		if len(step) == 0 {
@@ -106,9 +106,6 @@ func (e *Executor) runSteps(ctx context.Context, steps [][]string, env map[strin
 		}
 		cmd := exec.CommandContext(ctx, step[0], step[1:]...)
 		cmd.Env = os.Environ()
-		for k, v := range env {
-			cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
-		}
 		o, err := cmd.CombinedOutput()
 		out.Write(o)
 		if err != nil {
@@ -132,7 +129,7 @@ func (e *Executor) executeTask(ctx context.Context, task Task) {
 		steps = [][]string{task.Command.Command}
 	}
 
-	output, err := e.runSteps(ctx, steps, task.Command.Environment)
+	output, err := e.runSteps(ctx, steps)
 	result.Output = output
 	result.Error = err
 	result.EndTime = time.Now()
@@ -174,7 +171,7 @@ func (e *Executor) Execute(ctx context.Context, plan *BuildPlan) ([]ExecutionRes
 
 	// Registry login once, before any queue. Abort the run if it fails.
 	if len(plan.Login) > 0 {
-		if _, err := e.runSteps(ctx, plan.Login, nil); err != nil {
+		if _, err := e.runSteps(ctx, plan.Login); err != nil {
 			return nil, fmt.Errorf("registry login failed: %w", err)
 		}
 	}

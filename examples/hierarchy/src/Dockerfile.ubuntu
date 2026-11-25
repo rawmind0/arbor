@@ -1,8 +1,11 @@
-{{ template "base" . }}
-
-{{ define "content" }}
 # Base OS layer (root of the hierarchy). Common tooling every descendant gets.
+# src/ holds several Dockerfiles, so a change to conf/apt.conf changes only the
+# images whose Dockerfile mentions it: this one (and, through it, its children).
+ARG BASE=ubuntu:22.04
+FROM ${BASE}
+
+ENV DEBIAN_FRONTEND=noninteractive
+COPY conf/apt.conf /etc/apt/apt.conf.d/99-arbor
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl ca-certificates git xz-utils \
     && rm -rf /var/lib/apt/lists/*
-{{ end }}

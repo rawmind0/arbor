@@ -20,6 +20,7 @@ var templateFS embed.FS
 // not text rendering.
 var formatTemplates = template.Must(template.New("plan").Funcs(template.FuncMap{
 	"join":    strings.Join,
+	"shell":   shellJoin,
 	"add":     func(a, b int) int { return a + b },
 	"sub":     func(a, b int) int { return a - b },
 	"rfc3339": func(t time.Time) string { return t.Format(time.RFC3339) },
@@ -33,6 +34,24 @@ var formatTemplates = template.Must(template.New("plan").Funcs(template.FuncMap{
 		return nil
 	},
 }).ParseFS(templateFS, "templates/*.tmpl"))
+
+// shellJoin joins a command's arguments into one shell line, single-quoting the
+// arguments the shell would otherwise split or interpret (e.g. the `sh -c`
+// script of a registry login).
+func shellJoin(args []string) string {
+	quoted := make([]string, len(args))
+	for i, a := range args {
+		quoted[i] = shellQuote(a)
+	}
+	return strings.Join(quoted, " ")
+}
+
+func shellQuote(s string) string {
+	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_@%+=:,./-") == "" {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
 
 // Formatter renders a build plan to a writer in a chosen format.
 type Formatter struct {

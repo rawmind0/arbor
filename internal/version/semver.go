@@ -2,6 +2,8 @@ package version
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 
 	"github.com/Masterminds/semver/v3"
 )
@@ -29,24 +31,6 @@ func Parse(version string) (*Semver, error) {
 func NewVersion(major, minor, patch int) *Semver {
 	v := semver.New(uint64(major), uint64(minor), uint64(patch), "", "")
 	return &Semver{Version: v}
-}
-
-// IncrementPatch returns a new version with patch incremented
-func (v *Semver) IncrementPatch() *Semver {
-	newVer := semver.New(v.Major(), v.Minor(), v.Patch()+1, "", "")
-	return &Semver{Version: newVer}
-}
-
-// IncrementMinor returns a new version with minor incremented and patch reset
-func (v *Semver) IncrementMinor() *Semver {
-	newVer := semver.New(v.Major(), v.Minor()+1, 0, "", "")
-	return &Semver{Version: newVer}
-}
-
-// IncrementMajor returns a new version with major incremented and minor/patch reset
-func (v *Semver) IncrementMajor() *Semver {
-	newVer := semver.New(v.Major()+1, 0, 0, "", "")
-	return &Semver{Version: newVer}
 }
 
 // String returns the string representation
@@ -93,4 +77,41 @@ func (v *Semver) GetMinor() int {
 // Patch returns the patch version
 func (v *Semver) GetPatch() int {
 	return int(v.Patch())
+}
+
+// tagVersionRe splits an image tag version into an optional "v" prefix, up to
+// three dot-separated numbers, and an optional "-suffix" or "+suffix" (e.g.
+// "-alpine"), the same forms Parse accepts.
+var tagVersionRe = regexp.MustCompile(`^(v?)(\d+)(?:\.(\d+))?(?:\.(\d+))?([-+].*)?$`)
+
+// Bump returns version with its patch (or, when minor is true, its minor)
+// number incremented, editing the tag as written: image tags are not strict
+// semver, so each number keeps its zero-padding ("22.04.1" → "22.04.2", minor
+// "22.05.0"), a missing patch number is added ("22.04" → "22.04.1"), and any
+// "v" prefix or suffix ("-alpine") is kept.
+func Bump(version string, minor bool) (string, error) {
+	m := tagVersionRe.FindStringSubmatch(version)
+	if m == nil {
+		return "", fmt.Errorf("invalid version format: %s", version)
+	}
+	prefix, major, min, patch, rest := m[1], m[2], m[3], m[4], m[5]
+	if min == "" {
+		min = "0"
+	}
+	if patch == "" {
+		patch = "0"
+	}
+	if minor {
+		min = increment(min)
+		patch = fmt.Sprintf("%0*d", len(patch), 0)
+	} else {
+		patch = increment(patch)
+	}
+	return prefix + major + "." + min + "." + patch + rest, nil
+}
+
+// increment adds one to a decimal number, keeping its zero-padding width.
+func increment(n string) string {
+	v, _ := strconv.ParseUint(n, 10, 64) // digits only, guaranteed by tagVersionRe
+	return fmt.Sprintf("%0*d", len(n), v+1)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/rs/zerolog/log"
@@ -11,8 +12,6 @@ import (
 
 	"github.com/rawmind0/arbor/internal/builder"
 	"github.com/rawmind0/arbor/internal/config"
-	"github.com/rawmind0/arbor/internal/generate"
-	"github.com/rawmind0/arbor/internal/graph"
 	"github.com/rawmind0/arbor/internal/logging"
 	"github.com/rawmind0/arbor/internal/plan"
 	"github.com/rawmind0/arbor/internal/version"
@@ -22,9 +21,6 @@ var (
 	cfgFile          string
 	workers          int
 	changedOnly      bool
-	showLevels       bool
-	showArch         bool
-	arch             string
 	fix              bool
 	baseRef          string
 	gitStatus        bool
@@ -37,7 +33,6 @@ var (
 	dryRun           bool
 	withErrors       bool
 	push             bool
-	genFirst         bool
 	logLevel         = logging.NewLevelFlag(logging.DefaultLevel())
 )
 
@@ -95,54 +90,6 @@ func loadConfigured(cmd *cobra.Command) (*config.Config, error) {
 	return cfg, nil
 }
 
-// resolvePlan validates the config, applies git/changed-only handling, builds
-// the dependency graph, and generates the build plan. The returned bool is true
-// when there is nothing to build (changed-only with no changes). Shared by the
-// plan and build commands.
-func resolvePlan(cfg *config.Config) (*plan.BuildPlan, bool, error) {
-	if err := cfg.Validate(); err != nil {
-		return nil, false, err
-	}
-
-	// With --generate, render the Dockerfiles first so the plan/build uses
-	// up-to-date ones. Reuses the generate module — no duplicated logic.
-	if genFirst {
-		if _, err := generate.New(cfg).Run(); err != nil {
-			return nil, false, fmt.Errorf("failed to generate Dockerfiles: %w", err)
-		}
-	}
-
-	// Detect changes when changed-only is enabled (config is the source of truth).
-	if cfg.Config.ChangedOnly {
-		detector := config.NewChangeDetector(cfg, ".")
-		if err := detector.DetectChanges(cfg.Config.BaseRef); err != nil {
-			return nil, false, fmt.Errorf("failed to detect changes: %w", err)
-		}
-	}
-
-	// Build dependency graph
-	g := graph.NewGraph(cfg)
-	if err := g.Build(); err != nil {
-		return nil, false, fmt.Errorf("failed to build dependency graph: %w", err)
-	}
-
-	// Generate execution plan
-	planGenerator := plan.NewGenerator(cfg, g)
-	if cfg.Config.ChangedOnly {
-		buildPlan, err := planGenerator.GenerateChanged()
-		if err != nil {
-			return nil, false, fmt.Errorf("failed to generate plan for changed images: %w", err)
-		}
-		return buildPlan, buildPlan.GetTotalCommands() == 0, nil
-	}
-
-	buildPlan, err := planGenerator.Generate()
-	if err != nil {
-		return nil, false, fmt.Errorf("failed to generate plan: %w", err)
-	}
-	return buildPlan, false, nil
-}
-
 var rootCmd = &cobra.Command{
 	Use:   "arbor",
 	Short: "A tool to manage Docker hierarchy builds",
@@ -151,16 +98,28 @@ multi-architecture support, and parallel execution capabilities.`,
 	// Configure the logger from --log-level before any command runs
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		logging.Configure(logLevel.Level())
+		// The flags parsed, so a failure from here on is the command's own
+		// (invalid Dockerfile, missing bump, ...): print the error without the
+		// usage text, which is only useful for a wrong flag or argument.
+		cmd.SilenceUsage = true
 	},
 }
 
 var validateCmd = &cobra.Command{
 	Use:   "validate",
-	Short: "Validate configuration and check version cascading",
+	Short: "Validate configuration, Dockerfiles and version cascading",
+	Long: `Validate the configuration and every image's Dockerfile, then check versions.
+Each Dockerfile must start with 'ARG BASE' and build its final stage FROM ${BASE}
+so arbor can inject the parent image (--build-arg BASE=<parent tag>).
+Versions are compared against the merge base of --base-ref (default: master,
+then main) and HEAD; --fix applies the required bumps to the config file.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := config.LoadConfig(cfgFile, nil)
+		cfg, err := loadConfigured(cmd)
 		if err != nil {
 			return fmt.Errorf("failed to load config: %w", err)
+		}
+		if err := cfg.ValidateBuild(); err != nil {
+			return err
 		}
 
 		fmt.Println("✓ Configuration is valid")
@@ -186,18 +145,16 @@ var validateCmd = &cobra.Command{
 
 		if len(result.UpdatesRequired) > 0 {
 			fmt.Println("\n📋 Version updates required:")
-			for _, update := range result.UpdatesRequired {
-				fmt.Printf("  • %s: %s → %s (%s)\n",
-					update.ImageName, update.OldVersion, update.NewVersion, update.Reason)
+			for _, line := range result.Lines() {
+				fmt.Printf("  • %s\n", line)
 			}
 
-			if fix {
-				// The version module owns apply + save (and logs what it did).
-				if err := validator.Apply(result); err != nil {
-					return err
-				}
-			} else {
-				fmt.Println("\n💡 Use --fix flag to apply these updates")
+			if !fix {
+				return fmt.Errorf("%d version update(s) required; run `arbor validate --fix`", len(result.UpdatesRequired))
+			}
+			// The version module owns apply + save (and logs what it did).
+			if err := validator.Apply(result); err != nil {
+				return err
 			}
 		} else {
 			fmt.Println("✓ All versions are consistent")
@@ -207,39 +164,13 @@ var validateCmd = &cobra.Command{
 	},
 }
 
-var generateCmd = &cobra.Command{
-	Use:   "generate",
-	Short: "Generate Dockerfiles from templates",
-	Long: `Generate Dockerfiles from templates for all images.
-This is a lightweight, idempotent operation: it always regenerates the full set
-of Dockerfiles (the destination is cleaned first), so the output reflects exactly
-the current config. Incremental selection lives in 'plan'/'build', not here.
-By default, validates and automatically updates versions to maintain consistency.
-Use --skip-version-check to bypass version validation.`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		cfg, err := loadConfigured(cmd)
-		if err != nil {
-			return err
-		}
-
-		// All generation logic (version reconcile + idempotent render) lives in
-		// the generate module; this command only loads the config and calls it.
-		count, err := generate.New(cfg).Run()
-		if err != nil {
-			return err
-		}
-
-		fmt.Printf("\n✓ Generated %d Dockerfiles total\n", count)
-		return nil
-	},
-}
-
 var planCmd = &cobra.Command{
 	Use:   "plan",
 	Short: "Create build execution plan",
 	Long: `Create an optimized build execution plan based on the dependency graph.
 The plan determines the optimal execution order and parallelization strategy.
-It assumes Dockerfiles have already been generated.`,
+Dockerfiles are built in place from the dockerfiles directory, each with its own
+folder as the build context; each image gets --build-arg BASE=<parent image>. Fails if versions need a bump (see validate).`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		cfg, err := loadConfigured(cmd)
 		if err != nil {
@@ -257,7 +188,7 @@ It assumes Dockerfiles have already been generated.`,
 			fmt.Println()
 		}
 
-		buildPlan, done, err := resolvePlan(cfg)
+		buildPlan, done, err := plan.Resolve(cfg)
 		if err != nil {
 			return err
 		}
@@ -268,8 +199,16 @@ It assumes Dockerfiles have already been generated.`,
 
 		// Output plan
 		if outputPath != "" {
-			// Save to file
-			if err := buildPlan.SaveToFile(outputPath, planFormat); err != nil {
+			// Save to file: JSON or YAML, from the extension unless --format
+			// says otherwise (the default "human" format is display only).
+			format := planFormat
+			if !cmd.Flags().Changed("format") {
+				format = "yaml"
+				if strings.EqualFold(filepath.Ext(outputPath), ".json") {
+					format = "json"
+				}
+			}
+			if err := buildPlan.SaveToFile(outputPath, format); err != nil {
 				return fmt.Errorf("failed to save plan: %w", err)
 			}
 			fmt.Printf("✓ Plan saved to %s\n", outputPath)
@@ -293,7 +232,7 @@ var buildCmd = &cobra.Command{
 	Short: "Build container images",
 	Long: `Build container images using an execution plan.
 Can either load a plan from file or generate one on-the-fly.
-Assumes Dockerfiles have been generated with the 'generate' command.`,
+When generating one, the same checks as 'plan' apply.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := context.Background()
 		var buildPlan *plan.BuildPlan
@@ -321,14 +260,14 @@ Assumes Dockerfiles have been generated with the 'generate' command.`,
 			}
 
 			// A multi-arch image must be pushed (its manifest cannot be loaded
-			// locally); enforce this only at build time so plan/generate stay
-			// lenient previews.
+			// locally); enforce this only at build time so plan stays a
+			// lenient preview.
 			if err := cfg.ValidateMultiArchPush(); err != nil {
 				return err
 			}
 
 			var done bool
-			buildPlan, done, err = resolvePlan(cfg)
+			buildPlan, done, err = plan.Resolve(cfg)
 			if err != nil {
 				return err
 			}
@@ -439,40 +378,35 @@ func init() {
 
 	// Validate command flags
 	validateCmd.Flags().BoolVar(&fix, "fix", false, "auto-fix version cascading issues")
-
-	// Generate command flags
-	generateCmd.Flags().StringVar(&arch, "arch", "", "generate for specific architecture only")
-	generateCmd.Flags().BoolVar(&skipVersionCheck, "skip-version-check", false, "skip version validation and automatic updates")
-	generateCmd.Flags().StringSliceVar(&sourcesGlob, "sources", nil, "glob patterns for additional image source files")
-	generateCmd.Flags().StringVar(&taskTimeout, "task-timeout", "", "timeout for individual tasks (e.g., '300s', '5m')")
+	validateCmd.Flags().StringVar(&baseRef, "base-ref", "", "git reference versions are compared against (default: master, then main)")
+	validateCmd.Flags().StringSliceVar(&sourcesGlob, "sources", nil, "glob patterns for additional image source files")
 
 	// Plan command flags
 	planCmd.Flags().BoolVar(&changedOnly, "changed-only", false, "create plan for changed images only")
-	planCmd.Flags().StringVar(&baseRef, "base-ref", "", "git reference to compare against (default: HEAD~1 or uncommitted)")
+	planCmd.Flags().StringVar(&baseRef, "base-ref", "", "git reference changes are measured from (default: master, then main)")
 	planCmd.Flags().BoolVar(&gitStatus, "git-status", false, "show git repository status")
-	planCmd.Flags().StringVar(&outputPath, "output", "", "save plan to file")
+	planCmd.Flags().StringVar(&outputPath, "output", "", "save plan to file (JSON for .json, else YAML, unless --format is set)")
 	planCmd.Flags().StringVar(&planFormat, "format", "human", "output format: human, json, yaml, commands, graph")
 	planCmd.Flags().StringSliceVar(&sourcesGlob, "sources", nil, "glob patterns for additional image source files")
 	planCmd.Flags().StringVar(&taskTimeout, "task-timeout", "", "timeout for individual tasks (e.g., '300s', '5m')")
 	planCmd.Flags().BoolVar(&dryRun, "dry-run", false, "generate plan with mock tasks for testing")
 	planCmd.Flags().BoolVar(&withErrors, "with-errors", false, "when used with --dry-run, simulate random build errors")
 	planCmd.Flags().BoolVar(&push, "push", false, "include tag/push + manifest steps in the plan (requires config.registry.owner)")
-	planCmd.Flags().BoolVar(&genFirst, "generate", false, "regenerate Dockerfiles before planning")
+	planCmd.Flags().BoolVar(&skipVersionCheck, "skip-version-check", false, "skip the version consistency check")
 
 	// Build command flags
 	buildCmd.Flags().StringVar(&planFile, "plan", "", "use plan from file instead of generating one")
 	buildCmd.Flags().BoolVar(&changedOnly, "changed-only", false, "build only changed images (when generating plan)")
 	buildCmd.Flags().IntVar(&workers, "workers", 0, "number of parallel workers (0 = use config/plan default)")
-	buildCmd.Flags().StringVar(&baseRef, "base-ref", "", "git reference to compare against (when generating plan)")
+	buildCmd.Flags().StringVar(&baseRef, "base-ref", "", "git reference changes are measured from (default: master, then main)")
 	buildCmd.Flags().StringSliceVar(&sourcesGlob, "sources", nil, "glob patterns for additional image source files")
 	buildCmd.Flags().StringVar(&taskTimeout, "task-timeout", "", "timeout for individual tasks (e.g., '300s', '5m')")
 	buildCmd.Flags().BoolVar(&dryRun, "dry-run", false, "simulate builds with mock tasks for testing")
 	buildCmd.Flags().BoolVar(&withErrors, "with-errors", false, "when used with --dry-run, simulate random build errors")
 	buildCmd.Flags().BoolVar(&push, "push", false, "tag and push each arch, then create+push the manifest (requires config.registry.owner; creds from REGISTRY_USERNAME/REGISTRY_PASSWORD)")
-	buildCmd.Flags().BoolVar(&genFirst, "generate", false, "regenerate Dockerfiles before building")
+	buildCmd.Flags().BoolVar(&skipVersionCheck, "skip-version-check", false, "skip the version consistency check (when generating plan)")
 
 	rootCmd.AddCommand(validateCmd)
-	rootCmd.AddCommand(generateCmd)
 	rootCmd.AddCommand(planCmd)
 	rootCmd.AddCommand(buildCmd)
 }

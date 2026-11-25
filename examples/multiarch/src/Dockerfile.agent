@@ -1,0 +1,8 @@
+# Agent layer: BASE is the ubuntu parent (a multi-arch manifest; the amd64 image
+# is used). Stands for a vendor tool that is only published for amd64, which is
+# why this image (and its children) override the global architectures.
+ARG BASE
+FROM ${BASE}
+
+ARG TARGETARCH
+RUN test "${TARGETARCH}" = amd64 && echo "vendor agent (amd64 only)" > /etc/agent-release

@@ -1,345 +1,207 @@
-package config
+package config_test
 
 import (
-	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+
+	"github.com/rawmind0/arbor/internal/config"
+	"github.com/rawmind0/arbor/test/examples"
+	"github.com/rawmind0/arbor/test/testutil"
 )
 
-func TestNewChangeDetector(t *testing.T) {
-	cfg := &Config{
-		Config: ConfigSection{
-			Dockerfiles: DockerfilesConfig{
-				Source: "src",
-			},
-		},
-	}
+// --changed-only marks images from every source, measured like the version
+// check (see git ChangedSince). Scenarios run on a copy of an example in a temp
+// repository (examples.Repo): committed on master, a feature branch on top.
 
-	detector := NewChangeDetector(cfg, "/tmp")
-	if detector.config != cfg {
-		t.Error("Expected detector to have reference to config")
+// changed runs change detection like `plan --changed-only` and returns the
+// sorted names of the images it marked.
+func changed(t *testing.T, useCase, baseRef string) []string {
+	t.Helper()
+	cfg := examples.LoadRepo(t, useCase)
+	d := config.NewChangeDetector(cfg, ".")
+	if err := d.DetectChanges(baseRef); err != nil {
+		t.Fatalf("DetectChanges: %v", err)
 	}
-	if detector.gitClient == nil {
-		t.Error("Expected detector to have git client")
+	names := d.GetChangedImageNames()
+	slices.Sort(names)
+	return names
+}
+
+func want(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("changed = %v, want %v", got, want)
 	}
 }
 
-func TestChangeDetector_markAllImagesChanged(t *testing.T) {
-	cfg := &Config{
-		Images: map[string]*ImageConfig{
-			"parent": {
-				Name: "parent",
-				Images: map[string]*ImageConfig{
-					"child": {
-						Name: "child",
-						Images: map[string]*ImageConfig{
-							"grandchild": {
-								Name: "grandchild",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	detector := NewChangeDetector(cfg, ".")
-	detector.markAllImagesChanged()
-
-	// Verify all images are marked as changed
-	if !cfg.Images["parent"].Changed {
-		t.Error("Expected parent image to be marked as changed")
-	}
-	if !cfg.Images["parent"].Images["child"].Changed {
-		t.Error("Expected child image to be marked as changed")
-	}
-	if !cfg.Images["parent"].Images["child"].Images["grandchild"].Changed {
-		t.Error("Expected grandchild image to be marked as changed")
-	}
+func TestChangedOnly_DockerfileInSourcesFile(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Append(examples.Dockerfile(examples.MultiSource, "api"), "RUN echo changed\n")
+	// Only the image itself is marked; its dependents are added by the plan.
+	want(t, changed(t, examples.MultiSource, ""), "api")
 }
 
-func TestChangeDetector_isDockerfileTemplate(t *testing.T) {
-	cfg := &Config{
-		Config: ConfigSection{
-			Dockerfiles: DockerfilesConfig{
-				Source: "src",
-			},
-		},
+// The reported case: a Dockerfile change plus its `--fix` bumps rebuilds the
+// changed image and its children, not every image of the config file.
+func TestChangedOnly_DockerfileChangeWithBumps(t *testing.T) {
+	r := examples.Repo(t, examples.Hierarchy)
+	r.Append(examples.Dockerfile(examples.Hierarchy, "nodejs"), "RUN echo changed\n")
+	if err := config.UpdateVersions("examples/hierarchy/config.yaml",
+		map[string]string{"nodejs": "20.0.2", "nodejs22": "22.0.1", "frontend": "1.0.2", "backend": "1.0.2"}); err != nil {
+		t.Fatal(err)
 	}
+	r.Commit("change nodejs and bump")
+	// nodejs22 is built from the same Dockerfile.
+	want(t, changed(t, examples.Hierarchy, ""), "nodejs", "nodejs22", "frontend", "backend")
+}
 
-	detector := NewChangeDetector(cfg, ".")
-
-	tests := []struct {
-		name     string
-		filePath string
-		want     bool
+// A change belongs to its closest Dockerfile folder (see ChangedImages):
+//   - a folder with one Dockerfile (api/, frontend/): any file in it, or below
+//     it, changes that image, and nothing in the folders above
+//   - a folder with several Dockerfiles (src/): only the images whose
+//     Dockerfile mentions the file (Dockerfile.ubuntu: conf/apt.conf)
+//   - a file outside every Dockerfile folder changes nothing
+func TestChangedOnly_DockerfileFolder(t *testing.T) {
+	r := examples.Repo(t, examples.Hierarchy)
+	reset := func() {
+		r.Git("checkout", "-q", "--", ".")
+		r.Git("clean", "-qfd")
+	}
+	for _, tt := range []struct {
+		file string
+		want []string
 	}{
-		{
-			name:     "dockerfile in source dir",
-			filePath: "src/Dockerfile.test",
-			want:     true,
-		},
-		{
-			name:     "dockerfile with different extension",
-			filePath: "src/test.dockerfile",
-			want:     true,
-		},
-		{
-			name:     "dockerfile contains name",
-			filePath: "src/custom-dockerfile",
-			want:     true,
-		},
-		{
-			name:     "not in source dir",
-			filePath: "other/Dockerfile.test",
-			want:     false,
-		},
-		{
-			name:     "not a dockerfile",
-			filePath: "src/config.yaml",
-			want:     false,
-		},
-		{
-			name:     "source dir itself",
-			filePath: "src",
-			want:     false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := detector.isDockerfileTemplate(tt.filePath)
-			if got != tt.want {
-				t.Errorf("isDockerfileTemplate(%s) = %v, want %v", tt.filePath, got, tt.want)
-			}
+		{"examples/hierarchy/src/api/main.go", []string{"api"}},
+		{"examples/hierarchy/src/api/README", []string{"api"}},                   // not copied, still its folder
+		{"examples/hierarchy/src/frontend/static/new.css", []string{"frontend"}}, // untracked, below its folder
+		{"examples/hierarchy/src/conf/apt.conf", []string{"ubuntu"}},             // shared folder, mentioned
+		{"examples/hierarchy/src/conf/other.conf", nil},                          // shared folder, not mentioned
+		{"examples/hierarchy/src/NOTES", nil},                                    // shared folder, not mentioned
+		{"examples/hierarchy/NOTES", nil},                                        // no Dockerfile folder
+	} {
+		t.Run(tt.file, func(t *testing.T) {
+			reset()
+			r.Write(tt.file, "changed\n")
+			want(t, changed(t, examples.Hierarchy, ""), tt.want...)
 		})
 	}
 }
 
-func TestChangeDetector_analyzeChangedFiles(t *testing.T) {
-	cfg := &Config{
-		Config: ConfigSection{
-			Dockerfiles: DockerfilesConfig{
-				Source: "src",
-			},
-		},
-		Images: map[string]*ImageConfig{
-			"test1": {
-				Name:       "test1",
-				Dockerfile: "Dockerfile.test1",
-			},
-			"test2": {
-				Name:       "test2",
-				Dockerfile: "Dockerfile.test2",
-			},
-		},
-	}
-
-	detector := NewChangeDetector(cfg, ".")
-
-	tests := []struct {
-		name         string
-		changedFiles []string
-		expectAll    bool
-		expectImages []string
-	}{
-		{
-			name:         "config file changed",
-			changedFiles: []string{"config.yaml", "src/Dockerfile.other"},
-			expectAll:    true,
-			expectImages: nil, // All images marked, specific checking not needed
-		},
-		{
-			name:         "specific dockerfile changed",
-			changedFiles: []string{"src/Dockerfile.test1"},
-			expectAll:    false,
-			expectImages: []string{"test1"},
-		},
-		{
-			name:         "multiple dockerfiles changed",
-			changedFiles: []string{"src/Dockerfile.test1", "src/Dockerfile.test2"},
-			expectAll:    false,
-			expectImages: []string{"test1", "test2"},
-		},
-		{
-			name:         "non-docker files changed",
-			changedFiles: []string{"README.md", "other/file.txt"},
-			expectAll:    false,
-			expectImages: []string{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reset changed flags
-			for _, img := range cfg.Images {
-				img.Changed = false
-			}
-
-			detector.analyzeChangedFiles(tt.changedFiles)
-
-			if tt.expectAll {
-				// Check that all images are marked as changed
-				for name, img := range cfg.Images {
-					if !img.Changed {
-						t.Errorf("Expected image %s to be marked as changed", name)
-					}
-				}
-			} else {
-				// Check specific images
-				changedImages := detector.GetChangedImageNames()
-				if len(changedImages) != len(tt.expectImages) {
-					t.Errorf("Expected %d changed images, got %d", len(tt.expectImages), len(changedImages))
-				}
-
-				for _, expected := range tt.expectImages {
-					found := false
-					for _, changed := range changedImages {
-						if changed == expected {
-							found = true
-							break
-						}
-					}
-					if !found {
-						t.Errorf("Expected image %s to be changed, but it wasn't", expected)
-					}
-				}
-			}
-		})
-	}
-}
-
-func TestChangeDetector_GetChangedImageNames(t *testing.T) {
-	cfg := &Config{
-		Images: map[string]*ImageConfig{
-			"parent": {
-				Name:    "parent",
-				Changed: true,
-				Images: map[string]*ImageConfig{
-					"child1": {
-						Name:    "child1",
-						Changed: false,
-					},
-					"child2": {
-						Name:    "child2",
-						Changed: true,
-					},
-				},
-			},
-			"other": {
-				Name:    "other",
-				Changed: false,
-			},
-		},
-	}
-
-	detector := NewChangeDetector(cfg, ".")
-	changedNames := detector.GetChangedImageNames()
-
-	expected := []string{"parent", "parent/child2"}
-	if len(changedNames) != len(expected) {
-		t.Errorf("Expected %d changed images, got %d", len(expected), len(changedNames))
-	}
-
-	for _, expectedName := range expected {
-		found := false
-		for _, name := range changedNames {
-			if name == expectedName {
-				found = true
-				break
-			}
+// In a folder with several Dockerfiles, a Dockerfile mentions a file by its
+// path or by one of its parent folders (COPY conf/ ...), as a whole path.
+func TestChangedImages_SharedFolderMentions(t *testing.T) {
+	cfg := examples.Files(t, map[string]string{
+		"config.yaml": "images:\n" +
+			"  a:\n    version: 1.0.0\n    base_image: alpine:3.20\n" +
+			"  b:\n    version: 1.0.0\n    base_image: alpine:3.20\n" +
+			"  c:\n    version: 1.0.0\n    base_image: alpine:3.20\n",
+		"src/Dockerfile.a": "ARG BASE\nFROM ${BASE}\nCOPY conf/ /etc/app/\n",
+		"src/Dockerfile.b": "ARG BASE\nFROM ${BASE}\nCOPY myconf/ /etc/app/\n",
+		"src/Dockerfile.c": "ARG BASE\nFROM ${BASE}\nCOPY [\"./conf/app.yaml\", \"/app.yaml\"]\n",
+	})
+	for file, want := range map[string][]string{
+		"src/conf/app.yaml":   {"a", "c"}, // a: its folder; c: the file itself
+		"src/conf/other.yaml": {"a"},
+		"src/myconf/x.yaml":   {"b"},
+		"src/Dockerfile.b":    {"b"},
+		"src/README":          nil,
+	} {
+		var got []string
+		for img := range cfg.ChangedImages([]string{file}) {
+			got = append(got, img.Name)
 		}
-		if !found {
-			t.Errorf("Expected to find changed image %s", expectedName)
+		slices.Sort(got)
+		if !slices.Equal(got, want) {
+			t.Errorf("ChangedImages(%s) = %v, want %v", file, got, want)
 		}
 	}
 }
 
-func TestChangeDetector_ShouldBuildAll(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "change-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	cfg := &Config{
-		Images: map[string]*ImageConfig{
-			"test": {
-				Name:    "test",
-				Changed: false,
-			},
-		},
-	}
-
-	tests := []struct {
-		name     string
-		setupDir func(string) error
-		want     bool
-	}{
-		{
-			name: "not a git repo",
-			setupDir: func(dir string) error {
-				return nil // No setup needed
-			},
-			want: true,
-		},
-		{
-			name: "git repo but no commits",
-			setupDir: func(dir string) error {
-				return os.Mkdir(filepath.Join(dir, ".git"), 0755)
-			},
-			want: true,
-		},
-		{
-			name: "no changed images",
-			setupDir: func(dir string) error {
-				return os.Mkdir(filepath.Join(dir, ".git"), 0755)
-			},
-			want: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testDir := filepath.Join(tmpDir, tt.name)
-			if err := os.Mkdir(testDir, 0755); err != nil {
-				t.Fatalf("Failed to create test dir: %v", err)
-			}
-
-			if err := tt.setupDir(testDir); err != nil {
-				t.Fatalf("Failed to setup test dir: %v", err)
-			}
-
-			detector := NewChangeDetector(cfg, testDir)
-			got := detector.ShouldBuildAll()
-			if got != tt.want {
-				t.Errorf("ShouldBuildAll() = %v, want %v", got, tt.want)
-			}
-		})
-	}
+// Inside a git worktree (.git is a file) changes are detected as usual, not
+// treated as "no git" (which rebuilds everything).
+func TestChangedOnly_InWorktree(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	worktree := filepath.Join(t.TempDir(), "wt")
+	r.Git("worktree", "add", "-q", "-b", "wt", worktree)
+	t.Chdir(worktree)
+	testutil.WriteFile(t, examples.Dockerfile(examples.MultiSource, "site"), "ARG BASE\nFROM ${BASE}\nRUN echo changed\n")
+	want(t, changed(t, examples.MultiSource, ""), "site")
 }
 
-func TestChangeDetector_GetGitStatus(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "change-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+// Comments and formatting are not changes.
+func TestChangedOnly_CommentsOnly(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Append("examples/multisource/config.yaml", "# touched\n")
+	r.Append("examples/multisource/services.yaml", "# touched\n")
+	want(t, changed(t, examples.MultiSource, ""))
+}
 
-	cfg := &Config{}
-	detector := NewChangeDetector(cfg, tmpDir)
-	status := detector.GetGitStatus()
+// A version bump in a --sources file marks only the bumped image.
+func TestChangedOnly_VersionBumpInSourcesFile(t *testing.T) {
+	examples.Repo(t, examples.MultiSource)
+	if err := config.UpdateVersions("examples/multisource/services.yaml", map[string]string{"api": "1.0.2"}); err != nil {
+		t.Fatal(err)
+	}
+	want(t, changed(t, examples.MultiSource, ""), "api")
+}
 
-	// Should have basic status fields
-	if _, ok := status["is_git_repo"]; !ok {
-		t.Error("Expected git status to include 'is_git_repo'")
-	}
-	if _, ok := status["has_commits"]; !ok {
-		t.Error("Expected git status to include 'has_commits'")
-	}
+// Any other field of an image entry counts too (args here).
+func TestChangedOnly_ImageArgsChanged(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Replace("examples/multisource/services.yaml", `GO_VERSION: "1.23.5"`, `GO_VERSION: "1.23.6"`)
+	want(t, changed(t, examples.MultiSource, ""), "api-base")
+}
 
-	// For non-git repo, should be false
-	if status["is_git_repo"] != false {
-		t.Error("Expected is_git_repo to be false for non-git directory")
-	}
+// A global setting that affects the builds marks every image, in every source.
+func TestChangedOnly_GlobalSettingChanged(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Replace("examples/multisource/config.yaml", "project: multisource-example", "project: renamed")
+	want(t, changed(t, examples.MultiSource, ""), "web-base", "site", "admin", "api-base", "api", "worker")
+}
+
+// Command defaults (workers, base_ref, ...) don't change what is built.
+func TestChangedOnly_CommandDefaultChanged(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Replace("examples/multisource/config.yaml", "workers: 4", "workers: 8")
+	want(t, changed(t, examples.MultiSource, ""))
+}
+
+// A --sources file that didn't exist at the base: all its images are new.
+func TestChangedOnly_NewSourcesFile(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Write("examples/multisource/extra.yaml",
+		"images:\n  extra:\n    version: 1.0.0\n    base_image: ubuntu:22.04\n    dockerfile: Dockerfile.api-base\n")
+	want(t, changed(t, examples.MultiSource, ""), "extra")
+}
+
+// Moving an image under another parent changes its BASE.
+func TestChangedOnly_ImageMoved(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Replace("examples/multisource/config.yaml",
+		"    images:\n      site:            # FROM web-base\n        version: 1.0.1\n      admin:           # FROM web-base\n        version: 1.0.1",
+		"    images:\n      site:            # FROM web-base\n        version: 1.0.1\n        images:\n          admin:\n            version: 1.0.1")
+	want(t, changed(t, examples.MultiSource, ""), "admin")
+}
+
+// Every commit on the branch counts; --base-ref HEAD~1 narrows to the last.
+func TestChangedOnly_MultiCommitBranch(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Append(examples.Dockerfile(examples.MultiSource, "site"), "RUN echo one\n")
+	r.Commit("change site")
+	r.Append(examples.Dockerfile(examples.MultiSource, "worker"), "RUN echo two\n")
+	r.Commit("change worker")
+	want(t, changed(t, examples.MultiSource, ""), "site", "worker")
+	want(t, changed(t, examples.MultiSource, "HEAD~1"), "worker")
+}
+
+// On master after a merge, the default covers what the merge brought in.
+func TestChangedOnly_DefaultBranchAfterMerge(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Append(examples.Dockerfile(examples.MultiSource, "admin"), "RUN echo changed\n")
+	r.Commit("change admin")
+	r.Git("checkout", "-q", "master")
+	r.Git("merge", "-q", "--no-ff", "feature", "-m", "merge feature")
+	want(t, changed(t, examples.MultiSource, ""), "admin")
 }

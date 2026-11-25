@@ -126,11 +126,13 @@ func (m *MockBuilder) Name() string {
 	return fmt.Sprintf("mock[%s]", m.RealBuilder.Name())
 }
 
-// Version returns the real version with mock indicator
+// Version returns the real version with mock indicator. The mock runs without
+// the real builder (dry runs), so when it isn't available the builder name is
+// reported instead of an error.
 func (m *MockBuilder) Version() (string, error) {
 	realVersion, err := m.RealBuilder.Version()
 	if err != nil {
-		return "", err
+		return fmt.Sprintf("mock[%s]", m.RealBuilder.Name()), nil
 	}
 	return fmt.Sprintf("mock[%s]", realVersion), nil
 }

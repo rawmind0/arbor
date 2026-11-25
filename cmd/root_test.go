@@ -5,487 +5,249 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
-	"github.com/rawmind0/arbor/internal/builder"
 	"github.com/rawmind0/arbor/test/examples"
 )
 
-// useRepoRoot changes the working directory to the repository root for the
-// duration of a test, so example configs' relative dockerfiles.source/
-// destination paths resolve. Used by command tests that read or write files.
-func useRepoRoot(t *testing.T) {
+// The commands are tested the way a user runs them: the real command tree with
+// real arguments (arbor), on copies of the examples in a temp git repository
+// (examples.Repo). How plans are built is asserted in detail in
+// test/integration; these tests cover what the CLI adds: flags, output, exit.
+
+// arbor runs the CLI with args and returns everything it printed (stdout,
+// where the commands print, and cobra's stderr) and its error.
+func arbor(t *testing.T, args ...string) (string, error) {
 	t.Helper()
-	wd, err := os.Getwd()
+	resetFlags(rootCmd)
+
+	stdout := os.Stdout
+	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chdir(wd) })
-	if err := os.Chdir(examples.Root()); err != nil {
+	os.Stdout = w
+	captured := make(chan string)
+	go func() {
+		data, _ := io.ReadAll(r)
+		captured <- string(data)
+	}()
+
+	cobraOut := new(bytes.Buffer)
+	rootCmd.SetArgs(args)
+	rootCmd.SetOut(cobraOut)
+	rootCmd.SetErr(cobraOut)
+	runErr := rootCmd.Execute()
+
+	_ = w.Close()
+	os.Stdout = stdout
+	out := <-captured + cobraOut.String()
+	rootCmd.SetArgs(nil)
+	rootCmd.SetOut(nil)
+	rootCmd.SetErr(nil)
+	return out, runErr
+}
+
+// resetFlags restores every flag of the command tree to its default (and
+// "not set"), as in a fresh process: the commands and their flag variables are
+// package state shared by every run.
+func resetFlags(c *cobra.Command) {
+	reset := func(f *pflag.Flag) {
+		if slice, ok := f.Value.(pflag.SliceValue); ok {
+			_ = slice.Replace(nil)
+		} else {
+			_ = f.Value.Set(f.DefValue)
+		}
+		f.Changed = false
+	}
+	c.Flags().VisitAll(reset)
+	c.PersistentFlags().VisitAll(reset)
+	c.SilenceUsage = false
+	for _, sub := range c.Commands() {
+		resetFlags(sub)
+	}
+}
+
+func mustRun(t *testing.T, args ...string) string {
+	t.Helper()
+	out, err := arbor(t, args...)
+	if err != nil {
+		t.Fatalf("arbor %s: %v\n%s", strings.Join(args, " "), err, out)
+	}
+	return out
+}
+
+func mustFail(t *testing.T, wantErr string, args ...string) string {
+	t.Helper()
+	out, err := arbor(t, args...)
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("arbor %s: error = %v, want one containing %q\n%s", strings.Join(args, " "), err, wantErr, out)
+	}
+	return out
+}
+
+func contains(t *testing.T, out string, want ...string) {
+	t.Helper()
+	for _, w := range want {
+		if !strings.Contains(out, w) {
+			t.Errorf("output does not contain %q:\n%s", w, out)
+		}
+	}
+}
+
+func excludes(t *testing.T, out string, unwanted ...string) {
+	t.Helper()
+	for _, u := range unwanted {
+		if strings.Contains(out, u) {
+			t.Errorf("output contains %q:\n%s", u, out)
+		}
+	}
+}
+
+var (
+	minimal     = filepath.Join("examples", examples.Minimal, "config.yaml")
+	multiArch   = filepath.Join("examples", examples.MultiArch, "config.yaml")
+	multiSource = filepath.Join("examples", examples.MultiSource, "config.yaml")
+	services    = filepath.Join("examples", examples.MultiSource, "services.yaml")
+)
+
+func TestRoot(t *testing.T) {
+	contains(t, mustRun(t), "Available Commands:", "validate", "plan", "build")
+	contains(t, mustRun(t, "--help"), "Usage:")
+	mustFail(t, `unknown command "invalid"`, "invalid")
+}
+
+// validate reports the required bumps and fails; --fix writes them; afterwards all is
+// consistent.
+func TestValidate_VersionFlow(t *testing.T) {
+	r := examples.Repo(t, examples.Minimal)
+	contains(t, mustRun(t, "validate", "--config", minimal),
+		"✓ Configuration is valid", "✓ All versions are consistent")
+
+	r.Append(examples.Dockerfile(examples.Minimal, "app"), "RUN echo changed\n")
+	before := r.Read(minimal)
+	contains(t, mustFail(t, "1 version update(s) required; run `arbor validate --fix`", "validate", "--config", minimal),
+		"app: 1.0.1 → 1.0.2")
+	if r.Read(minimal) != before {
+		t.Fatal("validate without --fix changed the config")
+	}
+
+	mustRun(t, "validate", "--config", minimal, "--fix")
+	contains(t, r.Read(minimal), "version: 1.0.2")
+	contains(t, mustRun(t, "validate", "--config", minimal), "✓ All versions are consistent")
+}
+
+// --sources files are loaded and their images checked too.
+func TestValidate_Sources(t *testing.T) {
+	r := examples.Repo(t, examples.MultiSource)
+	r.Append(examples.Dockerfile(examples.MultiSource, "api"), "RUN echo changed\n")
+	contains(t, mustFail(t, "version update(s) required", "validate", "--config", multiSource, "--sources", services), "api: 1.0.1 → 1.0.2")
+	excludes(t, mustRun(t, "validate", "--config", multiSource), "api:")
+}
+
+func TestValidate_Errors(t *testing.T) {
+	examples.Repo(t, examples.Minimal)
+	mustFail(t, `base ref "no-such-ref" not found`, "validate", "--config", minimal, "--base-ref", "no-such-ref")
+	mustFail(t, "failed to load config", "validate", "--config", "missing.yaml")
+
+	examples.Write(t, map[string]string{
+		"malformed.yaml": "config:\n  invalid: [\n",
+		"config.yaml": "images:\n  base:\n    version: 1.0.0\n    base_image: alpine:3.18\n" +
+			"    images:\n      app:\n        version: 1.0.0\n",
+		"src/Dockerfile.base": "ARG BASE\nFROM ${BASE}\n",
+		"src/Dockerfile.app":  "FROM alpine:3.18\n",
+	})
+	mustFail(t, "failed to load config", "validate", "--config", "malformed.yaml")
+	mustFail(t, `image "app" (src/Dockerfile.app): first instruction must be `+"`ARG BASE`", "validate", "--config", "config.yaml")
+}
+
+// plan builds each Dockerfile in place with BASE set to the parent's tag.
+func TestPlan_Commands(t *testing.T) {
+	examples.Repo(t, examples.Minimal)
+	contains(t, mustRun(t, "plan", "--config", minimal, "--format", "commands"),
+		"-t library/base:1.0.1 -f examples/minimal/src/Dockerfile.base --build-arg BASE=alpine:3.18",
+		"-t library/app:1.0.1 -f examples/minimal/src/Dockerfile.app --build-arg BASE=library/base:1.0.1")
+}
+
+// plan refuses a missing bump (without the usage text) unless the check is
+// skipped.
+func TestPlan_VersionGate(t *testing.T) {
+	r := examples.Repo(t, examples.Minimal)
+	r.Append(examples.Dockerfile(examples.Minimal, "app"), "RUN echo changed\n")
+	out := mustFail(t, "version updates required", "plan", "--config", minimal)
+	contains(t, out, "app: 1.0.1 → 1.0.2", "arbor validate --fix")
+	excludes(t, out, "Usage:")
+	mustRun(t, "plan", "--config", minimal, "--skip-version-check")
+}
+
+// --changed-only plans the changed image and its dependents only.
+func TestPlan_ChangedOnly(t *testing.T) {
+	r := examples.Repo(t, examples.Minimal)
+	r.Append(examples.Dockerfile(examples.Minimal, "app"), "RUN echo changed\n")
+	mustRun(t, "validate", "--config", minimal, "--fix")
+	out := mustRun(t, "plan", "--config", minimal, "--changed-only", "--format", "commands")
+	contains(t, out, "-t library/app:1.0.2")
+	excludes(t, out, "-t library/base:")
+
+	// A branch whose commits touch no image has nothing to build.
+	r.Git("checkout", "-q", "--", ".")
+	r.Write("NOTES", "unrelated\n")
+	r.Commit("unrelated")
+	contains(t, mustRun(t, "plan", "--config", minimal, "--changed-only"), "No changed images detected")
+}
+
+func TestPlan_Sources(t *testing.T) {
+	examples.Repo(t, examples.MultiSource)
+	contains(t, mustRun(t, "plan", "--config", multiSource, "--sources", services, "--format", "commands"),
+		"-t library/site:", "-t library/api:", "--build-arg BASE=library/api-base:1.0.1")
+	excludes(t, mustRun(t, "plan", "--config", multiSource, "--format", "commands"), "-t library/api:")
+}
+
+// --push=false overrides the file's push: true; plan adds the push steps only
+// with push.
+func TestPlan_Push(t *testing.T) {
+	examples.Repo(t, examples.MultiArch)
+	contains(t, mustRun(t, "plan", "--config", multiArch, "--format", "commands"), "--push")
+	excludes(t, mustRun(t, "plan", "--config", multiArch, "--format", "commands", "--push=false"), "--push")
+}
+
+// A saved plan (YAML or JSON from the extension) is what build --plan runs.
+func TestPlan_OutputAndBuildFromPlan(t *testing.T) {
+	examples.Repo(t, examples.Minimal)
+	for _, file := range []string{"plan.yaml", "plan.json"} {
+		contains(t, mustRun(t, "plan", "--config", minimal, "--dry-run", "--output", file), "✓ Plan saved to "+file)
+		contains(t, mustRun(t, "build", "--plan", file), "All 2 images built successfully")
+	}
+	contains(t, readFile(t, "plan.json"), `"metadata": {`)
+	mustFail(t, "unsupported format: graph", "plan", "--config", minimal, "--output", "plan.txt", "--format", "graph")
+}
+
+func TestBuild_DryRun(t *testing.T) {
+	examples.Repo(t, examples.Minimal, examples.MultiArch)
+	contains(t, mustRun(t, "build", "--config", minimal, "--dry-run"), "All 2 images built successfully")
+	// A multi-arch image can only be built to push.
+	mustFail(t, `multi-arch image "ubuntu" (2 architectures) requires push`,
+		"build", "--config", multiArch, "--dry-run", "--push=false")
+}
+
+// A wrong flag shows the usage; a failing command only its error.
+func TestErrorsWithoutUsage(t *testing.T) {
+	contains(t, mustFail(t, "unknown flag: --no-such-flag", "plan", "--no-such-flag"), "Usage:")
+	examples.Write(t, map[string]string{
+		"config.yaml": "images:\n  app:\n    version: 1.0.0\n    base_image: alpine:3.18\n",
+	})
+	excludes(t, mustFail(t, `image "app"`, "plan", "--config", "config.yaml"), "Usage:")
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-}
-
-// TestLoadConfigured_MergesFlags verifies loadConfigured folds the command's
-// flags into the config: a flag overrides the file only when the user set it, and
-// --dry-run becomes the corresponding mock mode.
-func TestLoadConfigured_MergesFlags(t *testing.T) {
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.yaml")
-	const fileYAML = `
-config:
-  builder: docker
-  push: false
-images:
-  app:
-    version: 1.0.0
-    base_image: alpine:3.19
-`
-	if err := os.WriteFile(configPath, []byte(fileYAML), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	newCmd := func() *cobra.Command {
-		c := &cobra.Command{Use: "test"}
-		c.Flags().BoolVar(&push, "push", false, "")
-		c.Flags().BoolVar(&skipVersionCheck, "skip-version-check", false, "")
-		c.Flags().BoolVar(&changedOnly, "changed-only", false, "")
-		c.Flags().StringVar(&baseRef, "base-ref", "", "")
-		return c
-	}
-	reset := func() {
-		cfgFile = configPath
-		push, skipVersionCheck, changedOnly, dryRun, withErrors = false, false, false, false, false
-		baseRef, taskTimeout, sourcesGlob = "", "", nil
-	}
-
-	t.Run("flag not set keeps file value", func(t *testing.T) {
-		reset()
-		cmd := newCmd()
-		if err := cmd.ParseFlags(nil); err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := loadConfigured(cmd)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cfg.Config.Push {
-			t.Error("push should stay false when --push not set")
-		}
-	})
-
-	t.Run("--push merges into config", func(t *testing.T) {
-		reset()
-		cmd := newCmd()
-		if err := cmd.ParseFlags([]string{"--push"}); err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := loadConfigured(cmd)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !cfg.Config.Push {
-			t.Error("--push should set cfg.Config.Push")
-		}
-	})
-
-	t.Run("--dry-run sets mock mode", func(t *testing.T) {
-		reset()
-		dryRun = true
-		cmd := newCmd()
-		if err := cmd.ParseFlags(nil); err != nil {
-			t.Fatal(err)
-		}
-		cfg, err := loadConfigured(cmd)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if cfg.Config.Mode != string(builder.ModeMock) {
-			t.Errorf("--dry-run should set mock mode, got %q", cfg.Config.Mode)
-		}
-		if !cfg.Config.DryRun {
-			t.Error("--dry-run should set cfg.Config.DryRun")
-		}
-	})
-}
-
-func TestExecute(t *testing.T) {
-	// Save original args
-	oldArgs := os.Args
-	defer func() { os.Args = oldArgs }()
-
-	// Test help command
-	os.Args = []string{"arbor", "--help"}
-	Execute()
-	// Should not panic
-}
-
-func TestRootCommand(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr bool
-	}{
-		{
-			name:    "no args shows help",
-			args:    []string{},
-			wantErr: false,
-		},
-		{
-			name:    "help flag",
-			args:    []string{"--help"},
-			wantErr: false,
-		},
-		{
-			name:    "invalid command",
-			args:    []string{"invalid"},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cmd := rootCmd
-			cmd.SetArgs(tt.args)
-
-			// Capture output
-			buf := new(bytes.Buffer)
-			cmd.SetOut(buf)
-			cmd.SetErr(buf)
-
-			err := cmd.Execute()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Execute() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestValidateCommand(t *testing.T) {
-	useRepoRoot(t)
-
-	// A deliberately malformed config — adversarial input for the parser.
-	malformed := filepath.Join(t.TempDir(), "malformed.yaml")
-	if err := os.WriteFile(malformed, []byte("config:\n  invalid_yaml: [\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	valid := "examples/minimal/config.yaml"
-
-	tests := []struct {
-		name       string
-		configPath string
-		args       []string
-		wantErr    bool
-	}{
-		{name: "valid config", configPath: valid},
-		{name: "valid config with fix flag", configPath: valid, args: []string{"--fix"}},
-		{name: "malformed config", configPath: malformed, wantErr: true},
-		{name: "non-existent config", configPath: "/non/existent/file.yaml", wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfgFile = tt.configPath
-			fix = false
-
-			cmd := &cobra.Command{Use: "test"}
-			cmd.RunE = validateCmd.RunE
-			cmd.Flags().StringVar(&cfgFile, "config", tt.configPath, "")
-			cmd.Flags().BoolVar(&fix, "fix", false, "")
-			cmd.ParseFlags(tt.args)
-			cfgFile = tt.configPath
-
-			if err := cmd.RunE(cmd, []string{}); (err != nil) != tt.wantErr {
-				t.Errorf("validateCmd() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestGenerateCommand(t *testing.T) {
-	// generate reads template sources and writes Dockerfiles, so run from the
-	// repo root where the example's relative paths resolve. The hierarchy
-	// example exercises multi-level FROM resolution.
-	useRepoRoot(t)
-	configPath := "examples/hierarchy/config.yaml"
-
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr bool
-		setup   func()
-		cleanup func()
-	}{
-		{
-			name:    "generate all",
-			args:    []string{},
-			wantErr: false,
-		},
-		{
-			name:    "generate with architecture filter",
-			args:    []string{"--arch", "linux/amd64"},
-			wantErr: false,
-		},
-		{
-			name:    "invalid config",
-			args:    []string{"--config", "/non/existent/file.yaml"},
-			wantErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reset global flags. Force --skip-version-check so the command never
-			// rewrites the committed example config.
-			cfgFile = configPath
-			arch = ""
-			skipVersionCheck = true
-
-			if tt.setup != nil {
-				tt.setup()
-			}
-			defer func() {
-				if tt.cleanup != nil {
-					tt.cleanup()
-				}
-			}()
-
-			cmd := &cobra.Command{Use: "test"}
-			cmd.RunE = generateCmd.RunE
-
-			// Add flags
-			cmd.Flags().StringVar(&cfgFile, "config", configPath, "")
-			cmd.Flags().StringVar(&arch, "arch", "", "")
-			cmd.Flags().BoolVar(&skipVersionCheck, "skip-version-check", true, "")
-
-			cmd.ParseFlags(tt.args)
-
-			err := cmd.RunE(cmd, []string{})
-			if (err != nil) != tt.wantErr {
-				t.Errorf("generateCmd() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestPlanCommand(t *testing.T) {
-	// plan only loads the config and builds the graph (no template reads), but
-	// run from the repo root so relative paths in the example resolve uniformly.
-	useRepoRoot(t)
-	configPath := "examples/hierarchy/config.yaml"
-
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr bool
-	}{
-		{
-			name:    "basic plan",
-			args:    []string{},
-			wantErr: false,
-		},
-		{
-			name:    "plan with levels",
-			args:    []string{"--show-levels"},
-			wantErr: false,
-		},
-		{
-			name:    "plan with architecture",
-			args:    []string{"--show-arch"},
-			wantErr: false,
-		},
-		{
-			name:    "plan changed only",
-			args:    []string{"--changed-only"},
-			wantErr: false,
-		},
-		{
-			name:    "plan with all flags",
-			args:    []string{"--show-levels", "--show-arch", "--changed-only"},
-			wantErr: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reset global flags
-			cfgFile = configPath
-			changedOnly = false
-			showLevels = false
-			showArch = false
-
-			cmd := &cobra.Command{Use: "test"}
-			cmd.RunE = planCmd.RunE
-
-			// Add flags
-			cmd.Flags().StringVar(&cfgFile, "config", configPath, "")
-			cmd.Flags().BoolVar(&changedOnly, "changed-only", false, "")
-			cmd.Flags().BoolVar(&showLevels, "show-levels", false, "")
-			cmd.Flags().BoolVar(&showArch, "show-arch", false, "")
-
-			cmd.ParseFlags(tt.args)
-
-			// Capture output
-			buf := new(bytes.Buffer)
-			cmd.SetOut(buf)
-			cmd.SetErr(buf)
-
-			err := cmd.RunE(cmd, []string{})
-			if (err != nil) != tt.wantErr {
-				t.Errorf("planCmd() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestBuildCommand(t *testing.T) {
-	useRepoRoot(t)
-	configPath := "examples/minimal/config.yaml"
-
-	tests := []struct {
-		name    string
-		args    []string
-		wantErr bool
-	}{
-		{
-			name:    "invalid config",
-			args:    []string{"--config", "/non/existent/file.yaml"},
-			wantErr: true,
-		},
-		// Removed tests that try to execute actual builds
-		// as they will hang waiting for docker commands
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Reset global flags
-			cfgFile = configPath
-			changedOnly = false
-			workers = 0
-
-			cmd := &cobra.Command{Use: "test"}
-			cmd.RunE = buildCmd.RunE
-
-			// Add flags
-			cmd.Flags().StringVar(&cfgFile, "config", configPath, "")
-			cmd.Flags().BoolVar(&changedOnly, "changed-only", false, "")
-			cmd.Flags().IntVar(&workers, "workers", 0, "")
-
-			cmd.ParseFlags(tt.args)
-
-			// The build will fail because docker/podman is not available in test
-			// but we're testing the command setup and config loading
-			_ = cmd.RunE(cmd, []string{})
-			// We don't check error here as the build will fail without docker
-		})
-	}
-}
-
-func TestInitFunction(t *testing.T) {
-	// Save original stdout
-	oldStdout := rootCmd.OutOrStdout()
-	defer rootCmd.SetOut(oldStdout)
-
-	// Capture output
-	r, w, _ := os.Pipe()
-	rootCmd.SetOut(w)
-
-	// Note: init() is called automatically when the package is imported
-	// We can't call it directly, so we just test the results
-
-	// Close writer
-	w.Close()
-
-	// Read output
-	_, _ = io.ReadAll(r)
-
-	// Check that commands are registered
-	commands := rootCmd.Commands()
-	expectedCommands := map[string]bool{
-		"validate": false,
-		"generate": false,
-		"plan":     false,
-		"build":    false,
-	}
-
-	for _, cmd := range commands {
-		if _, ok := expectedCommands[cmd.Use]; ok {
-			expectedCommands[cmd.Use] = true
-		}
-	}
-
-	for name, found := range expectedCommands {
-		if !found {
-			t.Errorf("Expected command '%s' not found", name)
-		}
-	}
-
-	// Check global flags
-	flag := rootCmd.PersistentFlags().Lookup("config")
-	if flag == nil {
-		t.Fatal("Expected 'config' flag not found")
-	}
-	if flag.DefValue != "config.yaml" {
-		t.Errorf("Expected default config value 'config.yaml', got '%s'", flag.DefValue)
-	}
-}
-
-func TestCommandFlags(t *testing.T) {
-	tests := []struct {
-		name  string
-		cmd   *cobra.Command
-		flags map[string]string // flag name -> expected default value
-	}{
-		{
-			name: "validate command flags",
-			cmd:  validateCmd,
-			flags: map[string]string{
-				"fix": "false",
-			},
-		},
-		{
-			name: "generate command flags",
-			cmd:  generateCmd,
-			flags: map[string]string{
-				"arch":               "",
-				"skip-version-check": "false",
-			},
-		},
-		{
-			name: "plan command flags",
-			cmd:  planCmd,
-			flags: map[string]string{
-				"changed-only": "false",
-				"output":       "",
-				"format":       "human",
-			},
-		},
-		{
-			name: "build command flags",
-			cmd:  buildCmd,
-			flags: map[string]string{
-				"workers":      "0",
-				"changed-only": "false",
-				"plan":         "",
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			for flagName, expectedDefault := range tt.flags {
-				flag := tt.cmd.Flags().Lookup(flagName)
-				if flag == nil {
-					t.Errorf("Expected flag '%s' not found in %s", flagName, tt.name)
-					continue
-				}
-				if flag.DefValue != expectedDefault {
-					t.Errorf("Flag '%s' default value = %s, want %s", flagName, flag.DefValue, expectedDefault)
-				}
-			}
-		})
-	}
+	return string(data)
 }

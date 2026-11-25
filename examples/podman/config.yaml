@@ -1,0 +1,38 @@
+config:
+  builder: podman
+  workers: 2
+  # Every build or push step may run for up to 15 minutes (default: 300s).
+  task_timeout: 15m
+  # A required bump raises the minor version (1.2.3 -> 1.3.0) instead of the
+  # patch version (the default).
+  version_increment: minor
+  # With podman, a multi-arch image is built into a local manifest list
+  # (podman build --platform ... --manifest <tag>) and then pushed with
+  # podman manifest push, so the whole hierarchy goes to a registry. Building it
+  # for real needs credentials:
+  #   REGISTRY_USERNAME=... REGISTRY_PASSWORD=... \
+  #     arbor build --config examples/podman/config.yaml
+  push: true
+  registry:
+    url: registry.example.com
+    owner: myorg
+  architectures:
+    - linux/amd64
+    - linux/arm64
+  dockerfiles: examples/podman/src
+  labels:
+    project: podman-example
+
+# A small Python stack built with podman for two architectures. Versions may
+# carry a "v" prefix (app); it is kept when bumping (v1.0.0 -> v1.1.0).
+images:
+  alpine:
+    version: 3.20.0
+    base_image: alpine:3.20
+    images:
+      python:                  # FROM alpine
+        version: 3.12.0
+        images:
+          app:                 # FROM python; copies app/*.py
+            version: v1.0.0
+            dockerfile: app/Dockerfile

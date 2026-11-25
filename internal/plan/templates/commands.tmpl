@@ -4,7 +4,7 @@
 {{if .Login}}
 # Registry login (credentials from REGISTRY_USERNAME / REGISTRY_PASSWORD)
 {{- range .Login}}
-{{join . " "}}
+{{shell .}}
 {{- end}}
 {{end}}
 {{- range $q := .Queues}}
@@ -16,7 +16,11 @@
 {{- range $b.Tasks}}
 {{- with commandFor $q .}}
 echo "Building {{.ImageTag}}"
-{{join .Command " "}}
+{{- range .Steps}}
+{{shell .}}
+{{- else}}
+{{shell .Command}}
+{{- end}}
 {{end}}
 {{- end}}
 {{- if lt $bi (sub (len $q.Batches) 1)}}

@@ -137,46 +137,6 @@ func TestSemver_String(t *testing.T) {
 	}
 }
 
-func TestSemver_Increment(t *testing.T) {
-	base, err := Parse("1.2.3-alpha+123")
-	if err != nil {
-		t.Fatalf("Failed to parse base version: %v", err)
-	}
-
-	t.Run("IncrementPatch", func(t *testing.T) {
-		result := base.IncrementPatch()
-		if result.GetMajor() != 1 || result.GetMinor() != 2 || result.GetPatch() != 4 {
-			t.Errorf("IncrementPatch() = %v, want 1.2.4", result.String())
-		}
-		// Prerelease and build metadata should be cleared
-		if result.Prerelease() != "" || result.Metadata() != "" {
-			t.Errorf("IncrementPatch() should clear prerelease and build metadata")
-		}
-	})
-
-	t.Run("IncrementMinor", func(t *testing.T) {
-		result := base.IncrementMinor()
-		if result.GetMajor() != 1 || result.GetMinor() != 3 || result.GetPatch() != 0 {
-			t.Errorf("IncrementMinor() = %v, want 1.3.0", result.String())
-		}
-		// Prerelease and build metadata should be cleared
-		if result.Prerelease() != "" || result.Metadata() != "" {
-			t.Errorf("IncrementMinor() should clear prerelease and build metadata")
-		}
-	})
-
-	t.Run("IncrementMajor", func(t *testing.T) {
-		result := base.IncrementMajor()
-		if result.GetMajor() != 2 || result.GetMinor() != 0 || result.GetPatch() != 0 {
-			t.Errorf("IncrementMajor() = %v, want 2.0.0", result.String())
-		}
-		// Prerelease and build metadata should be cleared
-		if result.Prerelease() != "" || result.Metadata() != "" {
-			t.Errorf("IncrementMajor() should clear prerelease and build metadata")
-		}
-	})
-}
-
 func TestSemver_Compare(t *testing.T) {
 	tests := []struct {
 		name string
@@ -261,5 +221,38 @@ func TestNewVersion(t *testing.T) {
 	v := NewVersion(1, 2, 3)
 	if v.GetMajor() != 1 || v.GetMinor() != 2 || v.GetPatch() != 3 {
 		t.Errorf("NewVersion(1, 2, 3) = %v, want 1.2.3", v.String())
+	}
+}
+
+// Bump edits the tag as written: zero-padding, prefix and suffix are kept.
+func TestBump(t *testing.T) {
+	tests := []struct {
+		version string
+		minor   bool
+		want    string
+	}{
+		{"1.0.1", false, "1.0.2"},
+		{"1.0.1", true, "1.1.0"},
+		{"22.04.1", false, "22.04.2"}, // Ubuntu-style: zero-padded minor kept
+		{"22.04.1", true, "22.05.0"},
+		{"22.09.9", false, "22.09.10"},
+		{"22.04.09", false, "22.04.10"},
+		{"22.04.09", true, "22.05.00"},
+		{"22.04", false, "22.04.1"}, // two-part tag gets a patch number
+		{"22", false, "22.0.1"},
+		{"v1.2.3", false, "v1.2.4"},
+		{"1.2.3-alpine", false, "1.2.4-alpine"},
+		{"1.23.6", false, "1.23.7"},
+	}
+	for _, tt := range tests {
+		got, err := Bump(tt.version, tt.minor)
+		if err != nil || got != tt.want {
+			t.Errorf("Bump(%q, minor=%v) = %q, %v; want %q", tt.version, tt.minor, got, err, tt.want)
+		}
+	}
+	for _, v := range []string{"latest", "20.04.x", "1.2.3.4", "1.2.3alpine"} {
+		if got, err := Bump(v, false); err == nil {
+			t.Errorf("Bump(%q) = %q, want an error", v, got)
+		}
 	}
 }

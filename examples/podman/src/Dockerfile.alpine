@@ -1,0 +1,5 @@
+# Base layer (root): arbor passes --build-arg BASE=alpine:3.20 (base_image).
+ARG BASE=alpine:3.20
+FROM ${BASE}
+
+RUN apk add --no-cache ca-certificates tzdata

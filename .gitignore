@@ -62,10 +62,6 @@ debug.test
 container-builder
 !cmd/container-builder/
 
-# Generated Dockerfiles (if you want to keep them out of version control)
-# Uncomment if desired:
-# examples/build/
-
 # Local config overrides
 *.local.yaml
 *.local.yml

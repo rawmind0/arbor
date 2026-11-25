@@ -1,6 +1,7 @@
-// Package examples resolves paths to the example use-case configs in examples/.
-// Those examples are the single source of config data for the whole test suite;
-// tests load them with config.LoadConfig(examples.Config(examples.Hierarchy)).
+// Package examples gives tests the example use cases in examples/, which are
+// the single source of config data for the test suite: Load loads one exactly
+// like the commands do (with its --sources files), Files loads a small custom
+// config the same way, and CopyToRepo puts a use case into a temp git repo.
 //
 // Paths are resolved relative to this source file (via runtime.Caller) so they
 // work regardless of the calling test's working directory.
@@ -18,11 +19,12 @@ const (
 	Hierarchy   = "hierarchy"
 	MultiArch   = "multiarch"
 	MultiSource = "multisource"
+	Podman      = "podman"
 )
 
-// Root returns the absolute path to the repository root. Command tests that run
-// generate/build (which resolve dockerfiles.source/destination relative to the
-// working directory) chdir here so the example configs' relative paths resolve.
+// Root returns the absolute path to the repository root. Tests that read the
+// examples' Dockerfiles (validate/plan/build resolve the dockerfiles directory
+// relative to the working directory) chdir here so the relative paths resolve.
 func Root() string {
 	_, self, _, _ := runtime.Caller(0) // <repo>/test/examples/examples.go
 	return filepath.Join(filepath.Dir(self), "..", "..")

@@ -1,7 +1,6 @@
 package plan
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +8,7 @@ import (
 
 	"github.com/rawmind0/arbor/internal/builder"
 	"github.com/rawmind0/arbor/test/examples"
+	"github.com/rawmind0/arbor/test/testutil"
 )
 
 func TestBuildPlan_Validate(t *testing.T) {
@@ -52,12 +52,12 @@ func TestBuildPlan_Validate(t *testing.T) {
 }
 
 func TestBuildPlan_HelperMethods(t *testing.T) {
-	// hierarchy = ubuntu, nodejs, golang, frontend, backend, worker
+	// hierarchy = ubuntu, tools, nodejs, nodejs22, golang, api, frontend, backend, worker
 	plan := planFromExample(t, examples.Hierarchy, builder.ModeMock)
 
 	t.Run("GetTotalCommands", func(t *testing.T) {
-		if total := plan.GetTotalCommands(); total != 6 {
-			t.Errorf("GetTotalCommands() = %d, want 6", total)
+		if total := plan.GetTotalCommands(); total != 9 {
+			t.Errorf("GetTotalCommands() = %d, want 9", total)
 		}
 	})
 
@@ -92,9 +92,7 @@ func TestLoadFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to marshal plan: %v", err)
 	}
-	if err := os.WriteFile(planFile, data, 0644); err != nil {
-		t.Fatalf("Failed to save plan: %v", err)
-	}
+	testutil.WriteFile(t, planFile, string(data))
 
 	loaded, err := LoadFromFile(planFile)
 	if err != nil {
@@ -120,21 +118,19 @@ func TestPlanEdgeCases(t *testing.T) {
 
 	t.Run("LoadFromFile with invalid YAML", func(t *testing.T) {
 		badFile := filepath.Join(t.TempDir(), "bad.yaml")
-		if err := os.WriteFile(badFile, []byte("not: valid: yaml: structure:"), 0644); err != nil {
-			t.Fatal(err)
-		}
+		testutil.WriteFile(t, badFile, "not: valid: yaml: structure:")
 		if _, err := LoadFromFile(badFile); err == nil {
 			t.Error("Expected error for invalid YAML")
 		}
 	})
 
 	t.Run("multi-arch does not multiply commands", func(t *testing.T) {
-		// The multiarch use case is ubuntu -> golang -> app (3 images) built for
-		// two architectures. Architecture is a build flag, so each image is still
-		// exactly one command.
+		// The multiarch use case is ubuntu -> {golang -> app, agent -> agent-app}
+		// (5 images), mostly built for two architectures. Architecture is a
+		// build flag, so each image is still exactly one command.
 		plan := planFromExample(t, examples.MultiArch, builder.ModeMock)
-		if plan.GetTotalCommands() != 3 {
-			t.Errorf("Expected 3 commands (one per image), got %d", plan.GetTotalCommands())
+		if plan.GetTotalCommands() != 5 {
+			t.Errorf("Expected 5 commands (one per image), got %d", plan.GetTotalCommands())
 		}
 		if len(plan.Queues) != 1 {
 			t.Errorf("Expected 1 queue (one per source), got %d", len(plan.Queues))

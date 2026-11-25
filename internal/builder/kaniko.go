@@ -24,14 +24,8 @@ func (k *Kaniko) BuildSteps(opts BuildOptions) [][]string {
 	if len(opts.Platforms) > 0 {
 		cmd.AddParamValue("--custom-platform", opts.Platforms[0])
 	}
-	for key, value := range opts.BuildArgs {
-		cmd.AddParam("--build-arg")
-		cmd.AddParam(fmt.Sprintf("%s=%s", key, value))
-	}
-	for key, value := range opts.Labels {
-		cmd.AddParam("--label")
-		cmd.AddParam(fmt.Sprintf("%s=%s", key, value))
-	}
+	cmd.AddMap("--build-arg", opts.BuildArgs)
+	cmd.AddMap("--label", opts.Labels)
 	cmd.AddExtra(opts.ExtraArgs)
 	return [][]string{cmd.Build()}
 }

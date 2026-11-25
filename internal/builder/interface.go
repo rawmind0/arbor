@@ -1,6 +1,10 @@
 package builder
 
-import "fmt"
+import (
+	"fmt"
+	"maps"
+	"slices"
+)
 
 // Builder defines the interface for container image builders
 type Builder interface {
@@ -83,10 +87,11 @@ func (c *CommandBuilder) AddFlag(flag string, enabled bool) *CommandBuilder {
 	return c
 }
 
-// AddMap adds multiple key-value pairs with the same parameter
+// AddMap adds multiple key-value pairs with the same parameter, sorted by key
+// so the same plan always yields the same command.
 func (c *CommandBuilder) AddMap(param string, values map[string]string) *CommandBuilder {
-	for k, v := range values {
-		c.args = append(c.args, param, fmt.Sprintf("%s=%s", k, v))
+	for _, k := range slices.Sorted(maps.Keys(values)) {
+		c.args = append(c.args, param, fmt.Sprintf("%s=%s", k, values[k]))
 	}
 	return c
 }

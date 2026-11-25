@@ -1,7 +1,7 @@
-{{ template "base" . }}
+# Backend app: BASE is the nodejs parent image. Express-style API.
+ARG BASE
+FROM ${BASE}
 
-{{ define "content" }}
-# Backend app: FROM nodejs (inherits the Node runtime). Express-style API.
+ENV PORT=8080
 EXPOSE ${PORT}
 CMD ["sh", "-c", "node -e \"require('http').createServer((_,r)=>r.end('ok')).listen(${PORT})\""]
-{{ end }}

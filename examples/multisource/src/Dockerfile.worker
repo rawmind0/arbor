@@ -1,9 +1,8 @@
-{{ template "base" . }}
+# Background worker: BASE is the api-base parent image (inherits the Go runtime).
+ARG BASE
+FROM ${BASE}
 
-{{ define "content" }}
-# Background worker: FROM api-base (inherits the Go runtime).
 WORKDIR /src
 RUN printf 'package main\nimport("fmt";"time")\nfunc main(){for{fmt.Println("job");time.Sleep(time.Second)}}\n' > main.go \
     && go build -o /usr/local/bin/worker main.go
 CMD ["worker"]
-{{ end }}

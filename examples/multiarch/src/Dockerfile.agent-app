@@ -1,0 +1,5 @@
+# Agent app: BASE is the agent parent image, so it is amd64-only too.
+ARG BASE
+FROM ${BASE}
+
+CMD ["sh", "-c", "echo agent app on $(uname -m)"]

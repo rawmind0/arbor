@@ -8,13 +8,18 @@ import (
 	"github.com/rawmind0/arbor/internal/builder"
 )
 
-// Validate runs the configuration checks shared by plan and build: when push is
-// on, the registry must be usable. It deliberately does NOT enforce the
+// ValidateBuild runs the buildability checks shared by validate, plan and build:
+// every Dockerfile follows the BASE contract (see ValidateDockerfiles) and, when
+// push is on, the registry must be usable. Unlike Validate it reads the
+// Dockerfiles from disk. It deliberately does NOT enforce the
 // multi-arch-requires-push rule (see ValidateMultiArchPush) — that is a
-// build-only concern, so `plan` and `generate` remain previews that succeed
-// even for an unbuildable multi-arch/no-push config. Builder availability is
-// likewise a separate, build-only concern (see ValidateBuilder).
-func (c *Config) Validate() error {
+// build-only concern, so `plan` remains a preview that succeeds even for an
+// unbuildable multi-arch/no-push config. Builder availability is likewise a
+// separate, build-only concern (see ValidateBuilder).
+func (c *Config) ValidateBuild() error {
+	if err := c.ValidateDockerfiles(); err != nil {
+		return fmt.Errorf("invalid Dockerfiles:\n%w", err)
+	}
 	if c.Config.Push {
 		return c.ValidatePush()
 	}
@@ -50,7 +55,7 @@ func (c *Config) ValidatePush() error {
 // but push is disabled. A multi-platform build produces a manifest list that
 // cannot be loaded into the local image store, so the next hierarchy level
 // cannot resolve its `FROM` locally — it must come from a registry. This is
-// enforced only by the build command (plan/generate are previews).
+// enforced only by the build command (plan is a preview).
 func (c *Config) ValidateMultiArchPush() error {
 	if c.Config.Push {
 		return nil
@@ -67,30 +72,12 @@ func (c *Config) ValidateMultiArchPush() error {
 	return nil
 }
 
-// allImages returns every image across all sources (or the main images when no
-// sources are registered), flattened across the hierarchy. Effective
-// architectures are already resolved onto each image during load.
+// allImages returns every image across all sources, flattened across the
+// hierarchy, in a stable order (sources as SourceIDs, parents before children).
 func (c *Config) allImages() []*ImageConfig {
 	var out []*ImageConfig
-	collect := func(images map[string]*ImageConfig) {
-		var walk func(map[string]*ImageConfig)
-		walk = func(m map[string]*ImageConfig) {
-			for _, img := range m {
-				out = append(out, img)
-				if img.Images != nil {
-					walk(img.Images)
-				}
-			}
-		}
-		walk(images)
+	for _, id := range c.SourceIDs() {
+		walkImages(c.Sources[id].Images, func(img *ImageConfig) { out = append(out, img) })
 	}
-
-	if len(c.Sources) > 0 {
-		for _, source := range c.Sources {
-			collect(source.Images)
-		}
-		return out
-	}
-	collect(c.Images)
 	return out
 }

@@ -1,16 +1,12 @@
 # The "api" stack — an independent hierarchy loaded as a separate source.
 images:
   api-base:
-    version: 1.0.0
+    version: 1.0.1
     base_image: ubuntu:22.04
-    envs:
-      DEBIAN_FRONTEND: noninteractive
     args:
       GO_VERSION: "1.23.5"
     images:
       api:             # FROM api-base
-        version: 1.0.0
-        envs:
-          PORT: "8080"
+        version: 1.0.1
       worker:          # FROM api-base
-        version: 1.0.0
+        version: 1.0.1

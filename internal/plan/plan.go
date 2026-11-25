@@ -68,13 +68,8 @@ type BuildCommand struct {
 	Steps   [][]string `json:"steps,omitempty" yaml:"steps,omitempty"`
 
 	// Build configuration
-	BuildArgs   map[string]string `json:"build_args,omitempty" yaml:"build_args,omitempty"`
-	Environment map[string]string `json:"environment,omitempty" yaml:"environment,omitempty"`
-	Labels      map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
-
-	// Execution metadata
-	Retries int `json:"retries,omitempty" yaml:"retries,omitempty"`
-	Timeout int `json:"timeout,omitempty" yaml:"timeout,omitempty"` // in seconds
+	BuildArgs map[string]string `json:"build_args,omitempty" yaml:"build_args,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 }
 
 // LoadFromFile loads a build plan from a file

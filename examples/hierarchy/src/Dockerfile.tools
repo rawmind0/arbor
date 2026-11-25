@@ -1,0 +1,5 @@
+# Tools: a root without base_image, so arbor passes no BASE and this FROM is
+# used as written.
+FROM alpine:3.20
+
+RUN apk add --no-cache curl jq

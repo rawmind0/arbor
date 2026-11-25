@@ -3,9 +3,7 @@ config:
   workers: 4
   architectures:
     - linux/amd64
-  dockerfiles:
-    source: examples/hierarchy/src
-    destination: examples/hierarchy/build
+  dockerfiles: examples/hierarchy/src
   # Owner namespaces every image tag (acme/ubuntu:..., acme/nodejs:...), locally
   # and when pushed. Single-arch images build and load locally without a push.
   registry:
@@ -13,47 +11,72 @@ config:
   labels:
     project: hierarchy-example
 
-# A layered hierarchy (APP_FLOW.md §5): a single base OS root, runtime layers
-# that inherit it and install a runtime, and apps that inherit a runtime.
-# Only the root sets base_image; every child's FROM resolves to its parent.
+# A layered hierarchy: a base OS root, runtime layers that inherit it and install
+# a runtime, and apps that inherit a runtime. Each child is built with
+# BASE=<its parent's tag>; a root with base_image gets BASE=<base_image>.
+# It also shows:
+#   - two roots in one file (ubuntu and tools), built in the same first batch
+#   - a root without base_image (tools): no BASE, its Dockerfile's own FROM
+#   - one Dockerfile shared by two images (nodejs, nodejs22) through
+#     `dockerfile:` and different args
+#   - a multi-stage Dockerfile (api) whose final stage is FROM ${BASE}
+#   - Dockerfiles in subfolders (frontend, api: `dockerfile: <name>/Dockerfile`)
+#     with their files next to them: the build context is the Dockerfile's
+#     folder, and any change in a folder with one Dockerfile changes its image
+#   - a file shared in a folder with several Dockerfiles (src/conf/apt.conf):
+#     a change to it changes only the images whose Dockerfile mentions it
 images:
   ubuntu:
-    version: 22.04.0
+    version: 22.04.1
     base_image: ubuntu:22.04
-    envs:
-      DEBIAN_FRONTEND: noninteractive
     labels:
       layer: os
     images:
       # Node runtime: FROM ubuntu, installs Node ${NODE_VERSION}.
       nodejs:
-        version: 20.0.0
+        version: 20.0.1
         args:
           NODE_VERSION: "20"
         labels:
           layer: runtime
         images:
-          frontend:            # FROM nodejs
-            version: 1.0.0
-            envs:
-              PORT: "3000"
+          frontend:            # FROM nodejs; copies frontend/static/
+            version: 1.0.1
+            dockerfile: frontend/Dockerfile
             labels:
               layer: app
           backend:             # FROM nodejs
-            version: 1.0.0
-            envs:
-              PORT: "8080"
+            version: 1.0.1
             labels:
               layer: app
+      # The same Dockerfile as nodejs, built with another Node version.
+      nodejs22:
+        version: 22.0.0
+        dockerfile: Dockerfile.nodejs
+        args:
+          NODE_VERSION: "22"
+        labels:
+          layer: runtime
       # Go runtime: FROM ubuntu, installs Go ${GO_VERSION} per architecture.
       golang:
-        version: 1.23.5
+        version: 1.23.6
         args:
           GO_VERSION: "1.23.5"
         labels:
           layer: runtime
         images:
           worker:              # FROM golang
-            version: 1.0.0
+            version: 1.0.1
             labels:
               layer: app
+      # Multi-stage: compiled in a golang:1.23 stage, shipped on ubuntu.
+      api:
+        version: 1.0.0
+        dockerfile: api/Dockerfile
+        labels:
+          layer: app
+  # A second root, without base_image: its Dockerfile has a fixed FROM.
+  tools:
+    version: 1.0.0
+    labels:
+      layer: tools

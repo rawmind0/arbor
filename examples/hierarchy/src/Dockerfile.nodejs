@@ -1,10 +1,11 @@
-{{ template "base" . }}
+# Node runtime layer: BASE is the ubuntu parent image (injected by arbor).
+# Installs Node ${NODE_VERSION} on top of the shared base. Shared by two images:
+# nodejs (NODE_VERSION=20) and nodejs22 (dockerfile: Dockerfile.nodejs, 22).
+ARG BASE
+FROM ${BASE}
 
-{{ define "content" }}
-# Node runtime layer: FROM ubuntu (resolved automatically to the parent image),
-# installs Node ${NODE_VERSION} on top of the shared base.
+ARG NODE_VERSION=20
 RUN curl -fsSL "https://deb.nodesource.com/setup_${NODE_VERSION}.x" | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 RUN node --version
-{{ end }}

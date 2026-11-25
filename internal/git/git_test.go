@@ -4,311 +4,77 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/rawmind0/arbor/test/testutil"
 )
 
-func TestNewClient(t *testing.T) {
-	tests := []struct {
-		name    string
-		workDir string
-		want    string
-	}{
-		{
-			name:    "with working directory",
-			workDir: "/tmp/test",
-			want:    "/tmp/test",
-		},
-		{
-			name:    "empty working directory",
-			workDir: "",
-			want:    ".",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			client := NewClient(tt.workDir)
-			if client.workDir != tt.want {
-				t.Errorf("NewClient() workDir = %v, want %v", client.workDir, tt.want)
-			}
-		})
+func TestNewClient_DefaultsToWorkingDirectory(t *testing.T) {
+	if got := NewClient("").workDir; got != "." {
+		t.Errorf("NewClient(\"\").workDir = %q, want \".\"", got)
 	}
 }
 
+// Outside a repository nothing is reported as git and every query errors.
+func TestNotAGitRepo(t *testing.T) {
+	c := NewClient(t.TempDir())
+	if c.IsGitRepo() || c.HasCommits() {
+		t.Fatalf("plain directory: IsGitRepo=%v HasCommits=%v, want false", c.IsGitRepo(), c.HasCommits())
+	}
+	queries := map[string]func() error{
+		"ChangedSince":        func() error { _, _, err := c.ChangedSince(""); return err },
+		"GetUncommittedFiles": func() error { _, err := c.GetUncommittedFiles(); return err },
+		"GetWorkingDirectory": func() error { _, err := c.GetWorkingDirectory(); return err },
+		"GetCurrentBranch":    func() error { _, err := c.GetCurrentBranch(); return err },
+		"IsCleanWorkingTree":  func() error { _, err := c.IsCleanWorkingTree(); return err },
+	}
+	for name, query := range queries {
+		if query() == nil {
+			t.Errorf("%s() = nil error outside a repository", name)
+		}
+	}
+}
+
+// A repository is detected from its root, a subdirectory and a worktree (whose
+// .git is a file, not a directory).
 func TestIsGitRepo(t *testing.T) {
-	// Create temporary directory for testing
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+	r := testutil.NewRepo(t, "master")
+	if !NewClient(r.Dir).IsGitRepo() || NewClient(r.Dir).HasCommits() {
+		t.Fatal("new repository: want IsGitRepo and no commits")
 	}
-	defer os.RemoveAll(tmpDir)
+	r.Write("sub/a.txt", "a\n")
+	r.Commit("init")
 
-	tests := []struct {
-		name     string
-		setupDir func(string) error
-		want     bool
-	}{
-		{
-			name: "not a git repo",
-			setupDir: func(dir string) error {
-				return nil // No setup needed
-			},
-			want: false,
-		},
-		{
-			name: "has .git directory",
-			setupDir: func(dir string) error {
-				return os.Mkdir(filepath.Join(dir, ".git"), 0755)
-			},
-			want: true,
-		},
-		{
-			name: "has .git file (not directory)",
-			setupDir: func(dir string) error {
-				return os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: /path/to/git"), 0644)
-			},
-			want: false,
-		},
+	worktree := filepath.Join(t.TempDir(), "wt")
+	r.Git("worktree", "add", "-q", "-b", "wt", worktree)
+	if info, err := os.Stat(filepath.Join(worktree, ".git")); err != nil || info.IsDir() {
+		t.Fatalf("worktree .git should be a file: %v", err)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testDir := filepath.Join(tmpDir, tt.name)
-			if err := os.Mkdir(testDir, 0755); err != nil {
-				t.Fatalf("Failed to create test dir: %v", err)
-			}
-
-			if err := tt.setupDir(testDir); err != nil {
-				t.Fatalf("Failed to setup test dir: %v", err)
-			}
-
-			client := NewClient(testDir)
-			got := client.IsGitRepo()
-			if got != tt.want {
-				t.Errorf("IsGitRepo() = %v, want %v", got, tt.want)
-			}
-		})
+	for name, dir := range map[string]string{"root": r.Dir, "subdirectory": filepath.Join(r.Dir, "sub"), "worktree": worktree} {
+		if c := NewClient(dir); !c.IsGitRepo() || !c.HasCommits() {
+			t.Errorf("%s: IsGitRepo=%v HasCommits=%v, want both true", name, c.IsGitRepo(), c.HasCommits())
+		}
 	}
 }
 
-func TestHasCommits(t *testing.T) {
-	// Create temporary directory for testing
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+func TestStatus(t *testing.T) {
+	r := testutil.NewRepo(t, "master")
+	r.Write("a.txt", "a\n")
+	r.Commit("init")
+	c := NewClient(r.Dir)
+
+	if branch, err := c.GetCurrentBranch(); err != nil || branch != "master" {
+		t.Errorf("GetCurrentBranch() = %q, %v; want master", branch, err)
 	}
-	defer os.RemoveAll(tmpDir)
-
-	client := NewClient(tmpDir)
-
-	// Test without git repo
-	if client.HasCommits() {
-		t.Error("HasCommits() should return false for non-git repo")
+	got, err := c.GetWorkingDirectory()
+	want, _ := filepath.EvalSymlinks(r.Dir)
+	if got, _ = filepath.EvalSymlinks(got); err != nil || got != want {
+		t.Errorf("GetWorkingDirectory() = %q, %v; want %q", got, err, want)
 	}
-
-	// Create .git directory
-	gitDir := filepath.Join(tmpDir, ".git")
-	if err := os.Mkdir(gitDir, 0755); err != nil {
-		t.Fatalf("Failed to create .git dir: %v", err)
+	if clean, err := c.IsCleanWorkingTree(); err != nil || !clean {
+		t.Errorf("IsCleanWorkingTree() = %v, %v; want clean", clean, err)
 	}
-
-	// Test with git repo but no commits (this will likely fail the git command)
-	// In a real test, we'd need to initialize a proper git repo
-	hasCommits := client.HasCommits()
-	// We expect this to be false since we didn't initialize a proper git repo
-	if hasCommits {
-		t.Error("HasCommits() should return false for git repo without commits")
+	r.Write("a.txt", "changed\n")
+	if clean, err := c.IsCleanWorkingTree(); err != nil || clean {
+		t.Errorf("after a change IsCleanWorkingTree() = %v, %v; want dirty", clean, err)
 	}
 }
-
-func TestGetChangedFiles_NotGitRepo(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	client := NewClient(tmpDir)
-	_, err = client.GetChangedFiles("HEAD~1")
-	if err == nil {
-		t.Error("GetChangedFiles() should return error for non-git repo")
-	}
-}
-
-func TestGetUncommittedFiles_NotGitRepo(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	client := NewClient(tmpDir)
-	_, err = client.GetUncommittedFiles()
-	if err == nil {
-		t.Error("GetUncommittedFiles() should return error for non-git repo")
-	}
-}
-
-func TestGetWorkingDirectory_NotGitRepo(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	client := NewClient(tmpDir)
-	_, err = client.GetWorkingDirectory()
-	if err == nil {
-		t.Error("GetWorkingDirectory() should return error for non-git repo")
-	}
-}
-
-func TestGetCurrentBranch_NotGitRepo(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	client := NewClient(tmpDir)
-	_, err = client.GetCurrentBranch()
-	if err == nil {
-		t.Error("GetCurrentBranch() should return error for non-git repo")
-	}
-}
-
-func TestIsCleanWorkingTree_NotGitRepo(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	client := NewClient(tmpDir)
-	_, err = client.IsCleanWorkingTree()
-	if err == nil {
-		t.Error("IsCleanWorkingTree() should return error for non-git repo")
-	}
-}
-
-// Simple tests without actual git operations
-// Real git operations will be tested in integration tests
-
-func TestGetChangedFiles_Validation(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	tests := []struct {
-		name    string
-		baseRef string
-		setup   func()
-		wantErr bool
-	}{
-		{
-			name:    "empty base ref uses HEAD",
-			baseRef: "",
-			setup:   func() {},
-			wantErr: true, // Will error if not a git repo
-		},
-		{
-			name:    "valid base ref",
-			baseRef: "HEAD~1",
-			setup:   func() {},
-			wantErr: true, // Will error if not a git repo
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if tt.setup != nil {
-				tt.setup()
-			}
-
-			client := NewClient(tmpDir)
-			_, err := client.GetChangedFiles(tt.baseRef)
-
-			if (err != nil) != tt.wantErr {
-				t.Errorf("GetChangedFiles() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestGetUncommittedFiles_Validation(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Test that it errors when not a git repo
-	client := NewClient(tmpDir)
-	_, err = client.GetUncommittedFiles()
-	if err == nil {
-		t.Error("GetUncommittedFiles() should error for non-git repo")
-	}
-}
-
-func TestGetWorkingDirectory_Validation(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Test that it errors when not a git repo
-	client := NewClient(tmpDir)
-	_, err = client.GetWorkingDirectory()
-	if err == nil {
-		t.Error("GetWorkingDirectory() should error for non-git repo")
-	}
-}
-
-func TestGetCurrentBranch_Validation(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Test that it errors when not a git repo
-	client := NewClient(tmpDir)
-	_, err = client.GetCurrentBranch()
-	if err == nil {
-		t.Error("GetCurrentBranch() should error for non-git repo")
-	}
-}
-
-func TestIsCleanWorkingTree_Validation(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Test that it errors when not a git repo
-	client := NewClient(tmpDir)
-	_, err = client.IsCleanWorkingTree()
-	if err == nil {
-		t.Error("IsCleanWorkingTree() should error for non-git repo")
-	}
-}
-
-func TestHasCommits_Validation(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "git-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	// Test with non-git repo
-	client := NewClient(tmpDir)
-	if client.HasCommits() {
-		t.Error("HasCommits() should return false for non-git repo")
-	}
-}
-
-// All complex git operations will be tested in integration tests
-// Unit tests only verify basic behavior and error handling

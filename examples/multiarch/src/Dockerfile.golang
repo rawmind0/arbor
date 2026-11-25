@@ -1,11 +1,13 @@
-{{ template "base" . }}
+# Go runtime layer: BASE is the ubuntu parent image. Installs Go ${GO_VERSION}
+# for the architecture currently being built (TARGETOS/TARGETARCH are set per
+# platform), so the same Dockerfile yields correct amd64 and arm64 layers.
+ARG BASE
+FROM ${BASE}
 
-{{ define "content" }}
-# Go runtime layer: FROM ubuntu. Installs Go ${GO_VERSION} for the architecture
-# currently being built ($TARGETOS/$TARGETARCH are set per platform), so the
-# same Dockerfile yields correct amd64 and arm64 layers.
+ARG GO_VERSION=1.23.5
+ARG TARGETOS
+ARG TARGETARCH
 RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.${TARGETOS}-${TARGETARCH}.tar.gz" \
     | tar -C /usr/local -xz
 ENV PATH="/usr/local/go/bin:${PATH}"
 RUN go version
-{{ end }}

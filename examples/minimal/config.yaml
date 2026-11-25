@@ -2,26 +2,22 @@ config:
   builder: docker
   architectures:
     - linux/amd64
-  dockerfiles:
-    source: examples/minimal/src
-    destination: examples/minimal/build
+  dockerfiles: examples/minimal/src
   labels:
     project: minimal-example
 
 # The smallest hierarchy that shows the point of this tool: a base image and a
-# child that inherits it. The child's FROM resolves to the base's tag, so the two
-# build in dependency order (base first, then app — two graph levels). Only the
-# root sets base_image; the child inherits it through its parent.
+# child that inherits it. arbor builds the child with --build-arg BASE=<base's
+# tag> (its Dockerfile does `FROM ${BASE}`), so the two build in dependency order
+# (base first, then app — two graph levels). Only the root sets base_image.
 images:
   base:
-    version: 1.0.0
+    version: 1.0.1
     base_image: alpine:3.18
     labels:
       layer: base
     images:
       app: # FROM base — inherits everything above
-        version: 1.0.0
-        envs:
-          APP_ENV: production
+        version: 1.0.1
         labels:
           layer: app

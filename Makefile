@@ -1,6 +1,6 @@
 .PHONY: fmt vet lint lint-fix test test-all test-unit test-integration test-race test-coverage test-coverage-html \
         build build-all build-linux-amd64 build-linux-arm64 build-darwin-arm64 run \
-        example-generate example-plan example-build \
+        example-validate example-plan example-build \
         release release-snapshot clean deps install help
 
 # Variables
@@ -14,8 +14,6 @@ EXAMPLE ?=
 example_list = $(if $(EXAMPLE),$(EXAMPLE),$(EXAMPLES))
 # Set DRY=1 to simulate builds instead of running real docker.
 DRY ?=
-# Set GEN=1 to regenerate Dockerfiles first (plan/build --generate).
-GEN ?=
 
 # Development commands
 fmt:
@@ -50,7 +48,7 @@ test-race:
 	go test -race ./...
 
 test-coverage:
-	go test -cover -coverprofile=coverage.out ./...
+	go test -cover -coverprofile=coverage.out ./internal/... ./cmd/...
 
 test-coverage-html: test-coverage
 	go tool cover -html=coverage.out
@@ -75,30 +73,30 @@ build-darwin-arm64:
 run:
 	go run . --help
 
-# Example workflow — generate, plan, then build the examples. By default every
+# Example workflow — validate, plan, then build the examples. By default every
 # example is processed; pass EXAMPLE=<name> to scope to one. Each folder's extra
 # source files are auto-loaded via --sources (a no-op for single-config examples,
 # and the second stack for multisource). build runs real docker by default
 # (needs Docker; multiarch also needs a registry + creds); add DRY=1 to simulate.
-#   make example-generate                 # all examples
+#   make example-validate                 # all examples
 #   make example-plan EXAMPLE=multiarch   # just one
 #   make example-build EXAMPLE=hierarchy DRY=1
-example-generate:
+example-validate:
 	@for ex in $(example_list); do \
-		echo "==> generate $$ex"; \
-		go run . generate --config examples/$$ex/config.yaml --sources "examples/$$ex/*.yaml" --skip-version-check || exit 1; \
+		echo "==> validate $$ex"; \
+		go run . validate --config examples/$$ex/config.yaml --sources "examples/$$ex/*.yaml" || exit 1; \
 	done
 
 example-plan:
 	@for ex in $(example_list); do \
 		echo "==> plan $$ex"; \
-		go run . plan --config examples/$$ex/config.yaml --sources "examples/$$ex/*.yaml" $(if $(GEN),--generate,) || exit 1; \
+		go run . plan --config examples/$$ex/config.yaml --sources "examples/$$ex/*.yaml" || exit 1; \
 	done
 
 example-build:
 	@for ex in $(example_list); do \
 		echo "==> build $$ex"; \
-		go run . build --config examples/$$ex/config.yaml --sources "examples/$$ex/*.yaml" $(if $(GEN),--generate,) $(if $(DRY),--dry-run,) || exit 1; \
+		go run . build --config examples/$$ex/config.yaml --sources "examples/$$ex/*.yaml" $(if $(DRY),--dry-run,) || exit 1; \
 	done
 
 # Release
@@ -144,10 +142,10 @@ help:
 	@echo "  release            - Create a release with goreleaser"
 	@echo "  release-snapshot   - Create a snapshot release"
 	@echo ""
-	@echo "Examples (all by default; EXAMPLE=<use-case> for one; GEN=1 regenerates first; DRY=1 simulates):"
-	@echo "  example-generate   - Generate the examples' Dockerfiles"
-	@echo "  example-plan       - Show the examples' build plans (GEN=1 to regenerate first)"
-	@echo "  example-build      - Build the examples (real docker; DRY=1 to simulate; GEN=1 to regenerate first)"
+	@echo "Examples (all by default; EXAMPLE=<use-case> for one; DRY=1 simulates):"
+	@echo "  example-validate   - Validate the examples' configs, Dockerfiles and versions"
+	@echo "  example-plan       - Show the examples' build plans"
+	@echo "  example-build      - Build the examples (real docker; DRY=1 to simulate)"
 	@echo ""
 	@echo "Utilities:"
 	@echo "  clean              - Clean build artifacts"

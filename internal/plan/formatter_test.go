@@ -361,3 +361,44 @@ func TestFormatter_EdgeCases(t *testing.T) {
 		}
 	})
 }
+
+// The commands script runs every step of every image (the push after a
+// single-arch build too) and quotes what the shell would split: the login's
+// `sh -c` script.
+func TestFormatter_CommandsRunEveryStep(t *testing.T) {
+	plan := planFromExample(t, examples.MultiArch, builder.ModeNormal)
+	for _, format := range []string{"commands", "human"} {
+		var buf bytes.Buffer
+		if err := NewFormatter(plan, &buf).Format(format); err != nil {
+			t.Fatal(err)
+		}
+		out := buf.String()
+		for _, want := range []string{
+			`sh -c 'echo "$REGISTRY_PASSWORD" | docker login -u "$REGISTRY_USERNAME" --password-stdin registry.example.com'`,
+			"docker push registry.example.com/myorg/agent:1.0.0",
+			"docker push registry.example.com/myorg/agent-app:1.0.0",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s output misses %q:\n%s", format, want, out)
+			}
+		}
+	}
+}
+
+func TestShellJoin(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"docker", "build", "-t", "a/b:1.0", "--label", "build.date=2026-01-01T00:00:00+01:00", "."},
+			"docker build -t a/b:1.0 --label build.date=2026-01-01T00:00:00+01:00 ."},
+		{[]string{"sh", "-c", "echo $X | y"}, `sh -c 'echo $X | y'`},
+		{[]string{"echo", "it's"}, `echo 'it'\''s'`},
+		{[]string{"echo", ""}, `echo ''`},
+	}
+	for _, tt := range tests {
+		if got := shellJoin(tt.args); got != tt.want {
+			t.Errorf("shellJoin(%q) = %s, want %s", tt.args, got, tt.want)
+		}
+	}
+}

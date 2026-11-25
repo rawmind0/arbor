@@ -18,21 +18,29 @@ type Node struct {
 	Changed      bool
 }
 
+// Graph is the dependency graph of one source's images (sources are
+// independent hierarchies, each planned as its own queue).
 type Graph struct {
 	Nodes  []*Node
 	Levels [][]*Node
 	config *config.Config
+	source string
 }
 
-func NewGraph(cfg *config.Config) *Graph {
+// NewGraph returns the graph of the images of cfg's source sourceID (see
+// config.SourceIDs); call Build to populate it. An unknown source has no images.
+func NewGraph(cfg *config.Config, sourceID string) *Graph {
 	return &Graph{
 		config: cfg,
+		source: sourceID,
 	}
 }
 
 func (g *Graph) Build() error {
 	// Create one node per image (architectures live on the image)
-	g.createNodes(g.config.Images, "")
+	if source := g.config.Sources[g.source]; source != nil {
+		g.createNodes(source.Images, "")
+	}
 
 	// Build dependencies
 	g.buildDependencies()

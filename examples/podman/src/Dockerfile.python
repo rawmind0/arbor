@@ -1,0 +1,5 @@
+# Python runtime: BASE is the alpine parent image.
+ARG BASE
+FROM ${BASE}
+
+RUN apk add --no-cache python3

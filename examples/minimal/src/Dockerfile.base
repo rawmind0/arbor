@@ -1,7 +1,8 @@
-{{ template "base" . }}
+# Base layer (root of the hierarchy): shared runtime deps every child inherits.
+# arbor passes --build-arg BASE=<base_image>; the default lets a plain
+# `docker build` work too.
+ARG BASE=alpine:3.18
+FROM ${BASE}
 
-{{ define "content" }}
-# Base layer: shared runtime deps every child inherits.
 RUN apk add --no-cache ca-certificates tini
 ENTRYPOINT ["/sbin/tini", "--"]
-{{ end }}

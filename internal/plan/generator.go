@@ -2,6 +2,9 @@ package plan
 
 import (
 	"fmt"
+	"maps"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,111 +14,75 @@ import (
 	"github.com/rawmind0/arbor/internal/graph"
 )
 
-// Generator creates build plans from configuration and dependency graph
+// Generator creates build plans from a validated configuration: one queue per
+// source (the config file's images and each --sources file), each built from
+// that source's own dependency graph.
 type Generator struct {
 	config    *config.Config
-	graph     *graph.Graph
 	gitClient *git.Client
 }
 
 // NewGenerator creates a new plan generator
-func NewGenerator(cfg *config.Config, g *graph.Graph) *Generator {
+func NewGenerator(cfg *config.Config) *Generator {
 	return &Generator{
 		config:    cfg,
-		graph:     g,
 		gitClient: git.NewClient("."),
 	}
 }
 
-// Generate creates a complete build plan
+// Generate creates a build plan for every image of every source.
 func (g *Generator) Generate() (*BuildPlan, error) {
-	// Always use multi-source approach for consistency
-	return g.GenerateMultiSource()
+	return g.generate(false)
 }
 
-// GenerateChanged creates a build plan for changed images only
+// GenerateChanged creates a build plan for the images marked as changed (see
+// config.ChangeDetector) plus everything that depends on them, in every source.
 func (g *Generator) GenerateChanged() (*BuildPlan, error) {
-	changedNodes := g.graph.GetChangedNodes()
-	if len(changedNodes) == 0 {
-		return &BuildPlan{
-			Metadata: g.createMetadata(true, 0),
-			Queues:   []Queue{},
-		}, nil
-	}
-
-	affectedNodes := g.graph.GetAffectedNodes(changedNodes)
-	return g.GenerateForNodes(affectedNodes)
+	return g.generate(true)
 }
 
-// GenerateForNodes creates a build plan for specific nodes
-// This is kept for tests that might use it directly
-func (g *Generator) GenerateForNodes(nodes []*graph.Node) (*BuildPlan, error) {
-	if len(nodes) == 0 {
-		return &BuildPlan{
-			Metadata: g.createMetadata(false, 0),
-			Queues:   []Queue{},
-		}, nil
-	}
-
+// generate builds one queue per source, in config.SourceIDs order. With
+// changedOnly, each queue holds only the changed images and their dependents.
+func (g *Generator) generate(changedOnly bool) (*BuildPlan, error) {
 	plan := &BuildPlan{
-		Metadata: g.createMetadata(false, len(nodes)),
-		Queues:   []Queue{g.buildSourceQueue("main", nodes)},
-	}
-	g.setLogin(plan)
-
-	return plan, nil
-}
-
-// GenerateMultiSource creates a build plan with multiple queues
-func (g *Generator) GenerateMultiSource() (*BuildPlan, error) {
-	plan := &BuildPlan{
-		Metadata: g.createMetadata(false, 0),
+		Metadata: g.createMetadata(changedOnly, 0),
 		Queues:   []Queue{},
 	}
 
 	totalImages := 0
-
-	// If no sources defined, use main images as single source
-	if len(g.config.Sources) == 0 {
-		g.config.Sources = map[string]*config.ImageSource{
-			"main": {
-				Images: g.config.Images,
-			},
-		}
-	}
-
-	// Generate a queue for each source
-	for sourceID, source := range g.config.Sources {
-		// Create a temporary config for this source
-		tempConfig := &config.Config{
-			Config:    g.config.Config,
-			Images:    source.Images,
-			IsGitRepo: g.config.IsGitRepo,
-		}
-
-		// Build graph for this source
-		sourceGraph := graph.NewGraph(tempConfig)
+	for _, sourceID := range g.config.SourceIDs() {
+		sourceGraph := graph.NewGraph(g.config, sourceID)
 		if err := sourceGraph.Build(); err != nil {
 			return nil, fmt.Errorf("failed to build graph for source %s: %w", sourceID, err)
 		}
 
-		// Get nodes in build order
 		nodes := sourceGraph.GetBuildOrder()
+		if changedOnly {
+			nodes = buildOrder(sourceGraph.GetAffectedNodes(sourceGraph.GetChangedNodes()))
+		}
 		if len(nodes) == 0 {
 			continue
 		}
 
-		// One queue per source (architectures are handled within each image task)
-		plan.Queues = append(plan.Queues, g.buildSourceQueue(sourceID, nodes))
-
+		plan.Queues = append(plan.Queues, g.buildSourceQueue(sourceID, sourceGraph, nodes))
 		totalImages += len(nodes)
 	}
 
-	// Update metadata with total images
 	plan.Metadata.TotalImages = totalImages
 	g.setLogin(plan)
-
 	return plan, nil
+}
+
+// buildOrder sorts nodes by graph level, then name, so a changed-only queue
+// lists commands in the same order a full build would.
+func buildOrder(nodes []*graph.Node) []*graph.Node {
+	sort.Slice(nodes, func(i, j int) bool {
+		if nodes[i].Level != nodes[j].Level {
+			return nodes[i].Level < nodes[j].Level
+		}
+		return nodes[i].Image.Name < nodes[j].Image.Name
+	})
+	return nodes
 }
 
 // builderMode returns the configured builder mode (defaulting to normal).
@@ -139,17 +106,17 @@ func (g *Generator) setLogin(plan *BuildPlan) {
 
 // buildSourceQueue builds one queue for a source: one command per image, batches
 // by graph level. Each image command handles all of its architectures.
-func (g *Generator) buildSourceQueue(id string, nodes []*graph.Node) Queue {
+func (g *Generator) buildSourceQueue(id string, sourceGraph *graph.Graph, nodes []*graph.Node) Queue {
 	commands := make([]BuildCommand, 0, len(nodes))
 	for _, node := range nodes {
-		commands = append(commands, g.createBuildCommand(node))
+		commands = append(commands, g.createBuildCommand(sourceGraph, node))
 	}
 	return Queue{ID: id, Batches: g.createBatches(nodes), Commands: commands}
 }
 
 // createBuildCommand creates the build (and, when pushing, push) step sequence
 // for one image: a single multi-platform build for all of its architectures.
-func (g *Generator) createBuildCommand(node *graph.Node) BuildCommand {
+func (g *Generator) createBuildCommand(sourceGraph *graph.Graph, node *graph.Node) BuildCommand {
 	img := node.Image
 	reg := g.config.Config.Registry
 	cmd := BuildCommand{
@@ -157,12 +124,10 @@ func (g *Generator) createBuildCommand(node *graph.Node) BuildCommand {
 		ImageName:      img.Name,
 		ImageTag:       node.ImageTag, // canonical [url/]owner/name:version
 		Architecture:   strings.Join(img.Architectures, ","),
-		DockerfilePath: img.GetBuildPath(g.config.Config.Dockerfiles.Destination),
-		BuildContext:   ".",
-		BuildArgs:      img.Args,
-		Environment:    img.Envs,
+		DockerfilePath: img.GetDockerfilePath(g.config.Config.Dockerfiles),
+		BuildContext:   img.GetBuildContext(g.config.Config.Dockerfiles),
+		BuildArgs:      buildArgs(sourceGraph, node),
 		Labels:         g.mergeLabels(img),
-		Timeout:        600,
 	}
 
 	opts := builder.BuildOptions{
@@ -191,6 +156,22 @@ func (g *Generator) createBuildCommand(node *graph.Node) BuildCommand {
 	return cmd
 }
 
+// buildArgs returns the image's configured build args plus BASE, the image its
+// Dockerfile builds FROM: the parent's canonical tag for a child, base_image for
+// a root. A root without base_image gets no BASE, so the Dockerfile's own
+// `ARG BASE=<default>` (or hardcoded FROM) applies — an empty --build-arg would
+// override that default. img.Args is copied, never mutated.
+func buildArgs(sourceGraph *graph.Graph, node *graph.Node) map[string]string {
+	args := make(map[string]string, len(node.Image.Args)+1)
+	for k, v := range node.Image.Args {
+		args[k] = v
+	}
+	if base := sourceGraph.GetParentImageTag(node); base != "" {
+		args[config.BaseArg] = base
+	}
+	return args
+}
+
 // generateFallbackCommand creates a docker-style multi-platform build when the
 // configured builder is not found.
 func (g *Generator) generateFallbackCommand(opts builder.BuildOptions) []string {
@@ -199,11 +180,11 @@ func (g *Generator) generateFallbackCommand(opts builder.BuildOptions) []string 
 		args = append(args, "--platform", strings.Join(opts.Platforms, ","))
 	}
 	args = append(args, "-f", opts.DockerfilePath, "-t", opts.ImageTag)
-	for key, value := range opts.BuildArgs {
-		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, value))
+	for _, key := range slices.Sorted(maps.Keys(opts.BuildArgs)) {
+		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", key, opts.BuildArgs[key]))
 	}
-	for key, value := range opts.Labels {
-		args = append(args, "--label", fmt.Sprintf("%s=%s", key, value))
+	for _, key := range slices.Sorted(maps.Keys(opts.Labels)) {
+		args = append(args, "--label", fmt.Sprintf("%s=%s", key, opts.Labels[key]))
 	}
 	return append(args, opts.BuildContext)
 }

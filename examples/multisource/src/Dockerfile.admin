@@ -1,7 +1,7 @@
-{{ template "base" . }}
+# Admin panel: BASE is the web-base parent image (inherits the Node runtime).
+ARG BASE
+FROM ${BASE}
 
-{{ define "content" }}
-# Admin panel: FROM web-base (inherits the Node runtime).
+ENV PORT=3001
 EXPOSE ${PORT}
 CMD ["sh", "-c", "serve -s /admin -l ${PORT}"]
-{{ end }}

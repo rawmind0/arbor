@@ -1,10 +1,10 @@
-{{ template "base" . }}
+# API service: BASE is the api-base parent image (inherits the Go runtime).
+ARG BASE
+FROM ${BASE}
 
-{{ define "content" }}
-# API service: FROM api-base (inherits the Go runtime).
+ENV PORT=8080
 WORKDIR /src
 RUN printf 'package main\nimport("fmt";"net/http";"os")\nfunc main(){http.HandleFunc("/",func(w http.ResponseWriter,_ *http.Request){fmt.Fprint(w,"ok")});http.ListenAndServe(":"+os.Getenv("PORT"),nil)}\n' > main.go \
     && go build -o /usr/local/bin/api main.go
 EXPOSE ${PORT}
 CMD ["api"]
-{{ end }}

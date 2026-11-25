@@ -23,7 +23,7 @@
 🔑 REGISTRY LOGIN
 ────────────────
 {{- range .Login}}
-  {{join . " "}}
+  {{shell .}}
 {{- end}}
 {{end}}
 🎯 EXECUTION QUEUES
@@ -64,7 +64,11 @@
         {{$k}}={{$v}}
 {{- end}}
 {{- end}}
-      Command: {{join .Command " "}}
+{{- range .Steps}}
+      Step:     {{shell .}}
+{{- else}}
+      Command:  {{shell .Command}}
+{{- end}}
 {{- end}}
 {{- end}}
 {{- end}}

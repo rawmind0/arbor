@@ -12,25 +12,34 @@ config:
   architectures:
     - linux/amd64
     - linux/arm64
-  dockerfiles:
-    source: examples/multiarch/src
-    destination: examples/multiarch/build
+  dockerfiles: examples/multiarch/src
   labels:
     project: multiarch-example
 
 # Same layered model as the hierarchy example, built for multiple architectures.
 # The Go runtime installs the correct toolchain per platform via $TARGETARCH.
+# Each multi-arch image is one multi-platform build that pushes its manifest
+# (docker buildx build --platform linux/amd64,linux/arm64 --push).
 images:
   ubuntu:
-    version: 22.04.0
+    version: 22.04.1
     base_image: ubuntu:22.04
-    envs:
-      DEBIAN_FRONTEND: noninteractive
     images:
       golang:
-        version: 1.23.5
+        version: 1.23.6
         args:
           GO_VERSION: "1.23.5"
         images:
           app:
+            version: 1.0.1
+      # A vendor agent that only ships amd64 binaries: the image overrides the
+      # global architectures, and its children inherit the override. A
+      # single-arch image is built and loaded locally, then pushed
+      # (docker build --platform linux/amd64, then docker push).
+      agent:
+        version: 1.0.0
+        architectures:
+          - linux/amd64
+        images:
+          agent-app:
             version: 1.0.0

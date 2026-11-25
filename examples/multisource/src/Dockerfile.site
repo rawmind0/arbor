@@ -1,7 +1,7 @@
-{{ template "base" . }}
+# Public site: BASE is the web-base parent image (inherits the Node runtime).
+ARG BASE
+FROM ${BASE}
 
-{{ define "content" }}
-# Public site: FROM web-base (inherits the Node runtime).
+ENV PORT=3000
 EXPOSE ${PORT}
 CMD ["sh", "-c", "serve -s /app -l ${PORT}"]
-{{ end }}

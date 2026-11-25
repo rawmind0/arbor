@@ -3,9 +3,7 @@ config:
   workers: 4
   architectures:
     - linux/amd64
-  dockerfiles:
-    source: examples/multisource/src
-    destination: examples/multisource/build
+  dockerfiles: examples/multisource/src
   labels:
     project: multisource-example
 
@@ -15,18 +13,12 @@ config:
 #     --sources 'examples/multisource/services.yaml'
 images:
   web-base:
-    version: 1.0.0
+    version: 1.0.1
     base_image: ubuntu:22.04
-    envs:
-      DEBIAN_FRONTEND: noninteractive
     args:
       NODE_VERSION: "20"
     images:
       site:            # FROM web-base
-        version: 1.0.0
-        envs:
-          PORT: "3000"
+        version: 1.0.1
       admin:           # FROM web-base
-        version: 1.0.0
-        envs:
-          PORT: "3001"
+        version: 1.0.1

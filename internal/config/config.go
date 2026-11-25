@@ -1,16 +1,21 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"time"
 
 	"github.com/rs/zerolog/log"
 	"gopkg.in/yaml.v3"
 
 	"github.com/rawmind0/arbor/internal/builder"
+	"github.com/rawmind0/arbor/internal/git"
 )
 
 // DefaultPlatform is set at build time via ldflags
@@ -22,21 +27,33 @@ var DefaultPlatform = "linux/amd64"
 // "library" mirrors Docker Hub's implicit namespace for official images.
 const DefaultOwner = "library"
 
+// BaseArg is the build argument every Dockerfile declares (`ARG BASE` before its
+// first FROM) and uses as its final stage's base image. arbor injects the parent
+// image through it (`--build-arg BASE=<parent tag>`), which keeps the Dockerfiles
+// plain and buildable with a regular `docker build`.
+const BaseArg = "BASE"
+
 type Config struct {
 	Config ConfigSection           `yaml:"config"`
 	Images map[string]*ImageConfig `yaml:"images"`
 
-	// Multiple image sources (key: source ID like "main", "databases", etc.)
+	// Sources holds every image the program works on, one entry per file:
+	// MainSource for the images section above, plus one per --sources file.
+	// Validate fills it; nothing else reads Images directly.
 	Sources map[string]*ImageSource `yaml:"-"`
 
 	// Runtime state
 	IsGitRepo bool   `yaml:"-"` // Set during config load
-	Path      string `yaml:"-"` // Path this config was loaded from (for SaveConfig)
+	Path      string `yaml:"-"` // Path this config was loaded from
 }
 
-// ImageSource represents a collection of images from a single source file
+// MainSource is the ID of the source holding the config file's own images.
+const MainSource = "main"
+
+// ImageSource represents a collection of images from a single file
 type ImageSource struct {
 	ID     string                  // Source identifier (e.g., "main", "databases")
+	Path   string                  // File the images were loaded from (where their versions live)
 	Images map[string]*ImageConfig // Images from this source
 }
 
@@ -44,16 +61,16 @@ type ConfigSection struct {
 	Builder       string            `yaml:"builder"`
 	Workers       int               `yaml:"workers,omitempty"`
 	Architectures []string          `yaml:"architectures,omitempty"`
-	Dockerfiles   DockerfilesConfig `yaml:"dockerfiles"`
+	Dockerfiles   string            `yaml:"dockerfiles,omitempty"` // Directory holding the Dockerfiles (default: src)
 	Labels        map[string]string `yaml:"labels,omitempty"`
 	TaskTimeout   string            `yaml:"task_timeout,omitempty"` // Task timeout duration (e.g., "300s")
 	Registry      RegistryConfig    `yaml:"registry,omitempty"`     // Push target (url + owner)
 
-	// Generate command defaults
-	SkipVersionCheck bool   `yaml:"skip_version_check,omitempty"`
+	// Command defaults
+	SkipVersionCheck bool   `yaml:"skip_version_check,omitempty"` // plan/build: skip the version check
 	ChangedOnly      bool   `yaml:"changed_only,omitempty"`
-	BaseRef          string `yaml:"base_ref,omitempty"`
-	Push             bool   `yaml:"push,omitempty"` // Push images + manifests to the registry
+	BaseRef          string `yaml:"base_ref,omitempty"` // Git ref changes are measured from (default: master, then main)
+	Push             bool   `yaml:"push,omitempty"`     // Push images + manifests to the registry
 
 	// Version validation settings
 	VersionIncrement string `yaml:"version_increment,omitempty"` // "patch" (default) or "minor"
@@ -64,54 +81,30 @@ type ConfigSection struct {
 	Mode   string `yaml:"mode,omitempty"`    // Builder mode: normal, mock, mock-error
 }
 
-type DockerfilesConfig struct {
-	Source      string `yaml:"source,omitempty"`
-	Destination string `yaml:"destination,omitempty"`
-}
-
 type ImageConfig struct {
 	Version       string                  `yaml:"version"`
 	BaseImage     string                  `yaml:"base_image,omitempty"`
 	Dockerfile    string                  `yaml:"dockerfile,omitempty"`
 	Architectures []string                `yaml:"architectures,omitempty"`
 	Args          map[string]string       `yaml:"args,omitempty"`
-	Envs          map[string]string       `yaml:"envs,omitempty"`
 	Labels        map[string]string       `yaml:"labels,omitempty"`
 	Images        map[string]*ImageConfig `yaml:"images,omitempty"`
 
 	// Internal fields populated during processing
-	Name     string `yaml:"-"`
-	Parent   string `yaml:"-"`
-	FullName string `yaml:"-"`
-	Changed  bool   `yaml:"-"`
+	Name    string `yaml:"-"`
+	Parent  string `yaml:"-"`
+	Changed bool   `yaml:"-"`
 }
 
-// isGitRepository checks if git is available and we're in a git repository
+// isGitRepository reports whether dir is inside a git repository.
 func isGitRepository(dir string) bool {
-	// First check if git command is available
-	checkGit := exec.Command("git", "--version")
-	if err := checkGit.Run(); err != nil {
-		// Git is not installed or not in PATH
-		return false
-	}
-
-	// Now check if we're in a git repository
-	cmd := exec.Command("git", "status")
-	cmd.Dir = dir
-	if err := cmd.Run(); err != nil {
-		// Not in a git repository
-		return false
-	}
-
-	return true
+	return git.NewClient(dir).IsGitRepo()
 }
 
-// LoadConfig reads the config file and returns a fully-assembled config: it
-// parses the YAML, merges in the optional command-line overrides (a partial
-// config map — flags win over the file), applies defaults, enforces git
-// constraints, processes the image tree, and loads any additional image sources
-// (overrides["sources"]). Pass nil for no overrides. The config is the single
-// source of truth — callers read cfg.Config.* afterwards.
+// LoadConfig reads the config file at configPath, overlays the optional
+// command-line overrides (a partial config map — flags win over the file),
+// records where the config came from, and completes it with Validate. Pass nil
+// for no overrides. Images from extra files are added with LoadAdditionalImages.
 //
 // Because the config is YAML-marshalable, override merging is just a YAML
 // overlay: marshal the overrides map and unmarshal it onto the parsed config, so
@@ -120,6 +113,9 @@ func LoadConfig(configPath string, overrides map[string]interface{}) (*Config, e
 	data, err := os.ReadFile(configPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	if err := checkRemovedSettings(configPath, data); err != nil {
+		return nil, err
 	}
 
 	var config Config
@@ -143,111 +139,146 @@ func LoadConfig(configPath string, overrides map[string]interface{}) (*Config, e
 	config.Path = configPath
 	config.IsGitRepo = isGitRepository(filepath.Dir(configPath))
 
-	// Structural defaults.
-	if config.Config.Builder == "" {
-		config.Config.Builder = builder.BuilderDocker
+	if err := config.Validate(); err != nil {
+		return nil, err
 	}
-	if config.Config.Workers == 0 {
-		config.Config.Workers = 2
-	}
-	if len(config.Config.Architectures) == 0 {
-		config.Config.Architectures = []string{DefaultPlatform}
-	}
-	if config.Config.Dockerfiles.Source == "" {
-		config.Config.Dockerfiles.Source = "src"
-	}
-	if config.Config.Dockerfiles.Destination == "" {
-		config.Config.Dockerfiles.Destination = "build"
-	}
-	// Owner is always present so every tag is namespace-qualified (local and
-	// registry alike); default to the shared "library" namespace when unset.
-	if config.Config.Registry.Owner == "" {
-		config.Config.Registry.Owner = DefaultOwner
-	}
-	if config.Config.VersionIncrement == "" {
-		config.Config.VersionIncrement = "patch"
-	}
-	if config.Config.VersionIncrement != "patch" && config.Config.VersionIncrement != "minor" {
-		return nil, fmt.Errorf("invalid version_increment: %s (must be 'patch' or 'minor')", config.Config.VersionIncrement)
-	}
-	if config.Config.TaskTimeout == "" {
-		config.Config.TaskTimeout = "300s"
-	}
-
-	// Enforce git-dependent constraints (overrides were already overlaid above).
-	config.ApplyGitConstraints()
-
-	// Process the main images into the primary source.
-	config.Sources = make(map[string]*ImageSource)
-	if len(config.Images) > 0 {
-		if err := processImageTree(&config, "", config.Images); err != nil {
-			return nil, fmt.Errorf("failed to process image tree: %w", err)
-		}
-		config.Sources["main"] = &ImageSource{ID: "main", Images: config.Images}
-	}
-
 	return &config, nil
 }
 
-func processImageTree(config *Config, parentName string, images map[string]*ImageConfig) error {
+// checkRemovedSettings rejects settings that were removed with Dockerfile
+// generation, saying what replaces them. Without it an old config would fail
+// with a bare YAML type error (the dockerfiles mapping) or, worse, silently
+// lose its environment variables (envs is otherwise ignored).
+func checkRemovedSettings(file string, data []byte) error {
+	var doc map[string]any
+	if yaml.Unmarshal(data, &doc) != nil {
+		return nil // the real parse reports it
+	}
+	var errs []error
+	if section, ok := doc["config"].(map[string]any); ok {
+		if _, ok := section["dockerfiles"].(map[string]any); ok {
+			errs = append(errs, fmt.Errorf("%s: config.dockerfiles is now the Dockerfiles directory "+
+				"(e.g. `dockerfiles: src`); source/destination were removed: Dockerfiles are built in place", file))
+		}
+	}
+	var walk func(images any)
+	walk = func(images any) {
+		tree, _ := images.(map[string]any)
+		for _, name := range slices.Sorted(maps.Keys(tree)) {
+			img, _ := tree[name].(map[string]any)
+			if _, ok := img["envs"]; ok {
+				errs = append(errs, fmt.Errorf("%s: image %q: envs was removed; set them with ENV in its Dockerfile", file, name))
+			}
+			walk(img["images"])
+		}
+	}
+	walk(doc["images"])
+	return errors.Join(errs...)
+}
+
+// Validate completes and checks a config, whether it was loaded from files or
+// built in code: it applies defaults, checks values, applies the git
+// constraints, registers the config's own images as the MainSource source, and
+// fills in the derived fields of every source's images (name, parent, default
+// Dockerfile, inherited architectures). Safe to call more than once
+// (LoadAdditionalImages calls it again after adding sources).
+func (c *Config) Validate() error {
+	if c.Config.Builder == "" {
+		c.Config.Builder = builder.BuilderDocker
+	}
+	if c.Config.Workers == 0 {
+		c.Config.Workers = 2
+	}
+	if len(c.Config.Architectures) == 0 {
+		c.Config.Architectures = []string{DefaultPlatform}
+	}
+	if c.Config.Dockerfiles == "" {
+		c.Config.Dockerfiles = "src"
+	}
+	// Owner is always present so every tag is namespace-qualified (local and
+	// registry alike); default to the shared "library" namespace when unset.
+	if c.Config.Registry.Owner == "" {
+		c.Config.Registry.Owner = DefaultOwner
+	}
+	if c.Config.VersionIncrement == "" {
+		c.Config.VersionIncrement = "patch"
+	}
+	if c.Config.VersionIncrement != "patch" && c.Config.VersionIncrement != "minor" {
+		return fmt.Errorf("invalid version_increment: %s (must be 'patch' or 'minor')", c.Config.VersionIncrement)
+	}
+	if c.Config.TaskTimeout == "" {
+		c.Config.TaskTimeout = "300s"
+	}
+
+	c.ApplyGitConstraints()
+
+	if c.Sources == nil {
+		c.Sources = make(map[string]*ImageSource)
+	}
+	if len(c.Images) > 0 {
+		c.Sources[MainSource] = &ImageSource{ID: MainSource, Path: c.Path, Images: c.Images}
+	}
+
+	for _, id := range c.SourceIDs() {
+		processImages(c, "", nil, c.Sources[id].Images)
+	}
+	return nil
+}
+
+// SourceIDs returns the source IDs in a stable order: MainSource first, then
+// the --sources files by name.
+func (c *Config) SourceIDs() []string {
+	ids := make([]string, 0, len(c.Sources))
+	for id := range c.Sources {
+		if id != MainSource {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	if _, ok := c.Sources[MainSource]; ok {
+		ids = append([]string{MainSource}, ids...)
+	}
+	return ids
+}
+
+// walkImages calls fn for every image in the tree, parents before children,
+// siblings in name order.
+func walkImages(images map[string]*ImageConfig, fn func(*ImageConfig)) {
+	names := make([]string, 0, len(images))
+	for name := range images {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		img := images[name]
+		fn(img)
+		walkImages(img.Images, fn)
+	}
+}
+
+// processImages fills in the derived fields of an image tree, passing each
+// image's architectures down to its children: an image uses its own
+// architectures, else its parent's, else (for a root) the global ones.
+func processImages(config *Config, parentName string, parentArchs []string, images map[string]*ImageConfig) {
 	for name, img := range images {
 		img.Name = name
 		img.Parent = parentName
-
-		if parentName != "" {
-			img.FullName = fmt.Sprintf("%s/%s", parentName, name)
-		} else {
-			img.FullName = name
-		}
 
 		// Set default dockerfile path if not specified
 		if img.Dockerfile == "" {
 			img.Dockerfile = fmt.Sprintf("Dockerfile.%s", name)
 		}
 
-		// Inherit architectures if not specified
 		if len(img.Architectures) == 0 {
 			if parentName != "" {
-				// Inherit from parent
-				if parent := findImageByName(config.Images, parentName); parent != nil {
-					img.Architectures = parent.Architectures
-				}
+				img.Architectures = parentArchs
 			} else {
-				// Use global config
 				img.Architectures = config.Config.Architectures
 			}
 		}
 
-		// Process child images recursively
-		if img.Images != nil {
-			if err := processImageTree(config, name, img.Images); err != nil {
-				return err
-			}
-		}
+		processImages(config, name, img.Architectures, img.Images)
 	}
-	return nil
-}
-
-func findImageByName(images map[string]*ImageConfig, name string) *ImageConfig {
-	for imgName, img := range images {
-		if imgName == name {
-			return img
-		}
-		if img.Images != nil {
-			if found := findImageByName(img.Images, name); found != nil {
-				return found
-			}
-		}
-	}
-	return nil
-}
-
-// FindImageByName finds an image by name in the configuration tree
-func (c *Config) FindImageByName(name string) *ImageConfig {
-	if name == "" {
-		return nil
-	}
-	return findImageByName(c.Images, name)
 }
 
 // IsInGitRepo returns whether the configuration is in a git repository
@@ -257,50 +288,27 @@ func (c *Config) IsInGitRepo() bool {
 
 // ApplyGitConstraints disables features that require a git repository when none
 // is available: version validation and changed-only. It is idempotent and warns
-// only when it actually changes a setting, so it is safe to re-run after folding
-// command-line flags into the config.
+// only when it actually changes a setting, so it is safe to re-run.
 func (c *Config) ApplyGitConstraints() {
-	if c.IsGitRepo {
+	if c.IsGitRepo || (c.Config.SkipVersionCheck && !c.Config.ChangedOnly) {
 		return
 	}
+	reason := "not in a git repository"
 	if exec.Command("git", "--version").Run() != nil {
-		log.Warn().Msg("git is not installed or not in PATH")
-	} else {
-		log.Warn().Msg("not in a git repository")
+		reason = "git is not installed or not in PATH"
 	}
 	if !c.Config.SkipVersionCheck {
-		log.Warn().Msg("enabling skip-version-check (version validation requires git)")
+		log.Warn().Msgf("%s: enabling skip-version-check (version validation requires git)", reason)
 		c.Config.SkipVersionCheck = true
 	}
 	if c.Config.ChangedOnly {
-		log.Warn().Msg("disabling changed-only (requires git to detect changes)")
+		log.Warn().Msgf("%s: disabling changed-only (requires git to detect changes)", reason)
 		c.Config.ChangedOnly = false
 	}
 }
 
-// SaveConfig writes the config back to the path it was loaded from (Config.Path).
-func (c *Config) SaveConfig() error {
-	if c.Path == "" {
-		return fmt.Errorf("config has no path to save to")
-	}
-
-	data, err := yaml.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	if err := os.MkdirAll(filepath.Dir(c.Path), 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	if err := os.WriteFile(c.Path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	return nil
-}
-
-// LoadAdditionalImages loads additional image definitions from glob patterns
+// LoadAdditionalImages loads additional image definitions from glob patterns,
+// one source per file (named after the file), then re-runs Validate.
 func (c *Config) LoadAdditionalImages(configPath string, patterns []string) error {
 	// Get absolute path of config file for comparison
 	absConfigPath, err := filepath.Abs(configPath)
@@ -335,6 +343,9 @@ func (c *Config) LoadAdditionalImages(configPath string, patterns []string) erro
 			if err != nil {
 				return fmt.Errorf("failed to read image file %s: %w", file, err)
 			}
+			if err := checkRemovedSettings(file, data); err != nil {
+				return err
+			}
 
 			// Parse only the images section
 			var imageFile struct {
@@ -348,20 +359,19 @@ func (c *Config) LoadAdditionalImages(configPath string, patterns []string) erro
 				continue // Skip files with no images
 			}
 
-			// Process the image tree for this source
-			if err := processImageTree(c, "", imageFile.Images); err != nil {
-				return fmt.Errorf("failed to process images from %s: %w", file, err)
+			if c.Sources == nil {
+				c.Sources = make(map[string]*ImageSource)
 			}
-
-			// Add to sources
 			c.Sources[sourceID] = &ImageSource{
 				ID:     sourceID,
+				Path:   file,
 				Images: imageFile.Images,
 			}
 		}
 	}
 
-	return nil
+	// Complete the new sources' images.
+	return c.Validate()
 }
 
 // GetTaskTimeout returns the task timeout as a Duration
@@ -379,12 +389,17 @@ func (c *Config) GetTaskTimeout() time.Duration {
 	return duration
 }
 
-func (img *ImageConfig) GetDockerfilePath(sourceDir string) string {
-	return filepath.Join(sourceDir, img.Dockerfile)
+// GetDockerfilePath returns the image's Dockerfile path inside dir (the
+// config's dockerfiles directory). One Dockerfile per image; architecture is a
+// build-time flag, not a file variant.
+func (img *ImageConfig) GetDockerfilePath(dir string) string {
+	return filepath.Join(dir, img.Dockerfile)
 }
 
-// GetBuildPath returns the generated Dockerfile path for the image. One
-// Dockerfile per image (architecture is a build-time flag, not a file variant).
-func (img *ImageConfig) GetBuildPath(destDir string) string {
-	return filepath.Join(destDir, fmt.Sprintf("Dockerfile.%s", img.Name))
+// GetBuildContext returns the image's build context: the directory its
+// Dockerfile is in (the dockerfiles directory, or a subfolder of it when
+// `dockerfile:` names one, e.g. api/Dockerfile). COPY/ADD paths are relative to
+// it, so the Dockerfile builds the same with or without arbor.
+func (img *ImageConfig) GetBuildContext(dir string) string {
+	return filepath.Dir(img.GetDockerfilePath(dir))
 }

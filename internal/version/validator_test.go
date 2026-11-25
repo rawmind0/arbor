@@ -1,431 +1,279 @@
 package version
 
 import (
-	"os"
-	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/rawmind0/arbor/internal/config"
+	"github.com/rawmind0/arbor/test/examples"
+	"github.com/rawmind0/arbor/test/testutil"
 )
 
-func TestNewValidator(t *testing.T) {
-	cfg := &config.Config{
-		Config: config.ConfigSection{
-			Dockerfiles: config.DockerfilesConfig{
-				Source: "src",
-			},
-		},
-	}
+// The version check needs git history, so every scenario runs on a copy of a
+// real example in a temp repository (examples.Repo): committed on "master",
+// with a "feature" branch on top, the way a pull request looks.
 
-	validator := NewValidator(cfg)
-	if validator == nil {
-		t.Fatal("NewValidator() returned nil")
+// bumps runs the check and returns the required updates as sorted
+// "image old→new" strings.
+func bumps(t *testing.T, cfg *config.Config) []string {
+	t.Helper()
+	result := mustValidate(t, cfg)
+	if len(result.Errors) > 0 {
+		t.Fatalf("Validate errors: %v", result.Errors)
 	}
-
-	if validator.config != cfg {
-		t.Error("Validator config not set correctly")
+	var out []string
+	for _, u := range result.UpdatesRequired {
+		out = append(out, u.ImageName+" "+u.OldVersion+"→"+u.NewVersion)
 	}
+	slices.Sort(out)
+	return out
+}
 
-	if validator.sourceDir != "src" {
-		t.Errorf("Source dir = %s, want 'src'", validator.sourceDir)
+func wantBumps(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Errorf("bumps = %v, want %v", got, want)
 	}
 }
 
-func TestValidator_buildImageGraph(t *testing.T) {
-	cfg := &config.Config{
-		Config: config.ConfigSection{
-			Dockerfiles: config.DockerfilesConfig{
-				Source: "src",
-			},
-		},
-		Images: map[string]*config.ImageConfig{
-			"parent": {
-				Name:    "parent",
-				Version: "1.0.0",
-				Images: map[string]*config.ImageConfig{
-					"child1": {
-						Name:    "child1",
-						Version: "1.0.0",
-					},
-					"child2": {
-						Name:    "child2",
-						Version: "1.0.0",
-						Images: map[string]*config.ImageConfig{
-							"grandchild": {
-								Name:    "grandchild",
-								Version: "1.0.0",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	validator := NewValidator(cfg)
-	validator.buildImageGraph()
-
-	// Check parent -> children mapping
-	if len(validator.imageGraph["parent"]) != 2 {
-		t.Errorf("Parent should have 2 children, got %d", len(validator.imageGraph["parent"]))
-	}
-
-	if len(validator.imageGraph["child2"]) != 1 {
-		t.Errorf("Child2 should have 1 child, got %d", len(validator.imageGraph["child2"]))
-	}
-
-	if len(validator.imageGraph["child1"]) != 0 {
-		t.Errorf("Child1 should have no children, got %d", len(validator.imageGraph["child1"]))
-	}
-}
-
-func TestValidator_validateSemverCompliance(t *testing.T) {
-	tests := []struct {
-		name      string
-		cfg       *config.Config
-		wantError bool
-		errCount  int
-	}{
-		{
-			name: "valid semver versions",
-			cfg: &config.Config{
-				Images: map[string]*config.ImageConfig{
-					"test": {
-						Name:    "test",
-						Version: "1.0.0",
-					},
-				},
-			},
-			wantError: false,
-		},
-		{
-			name: "invalid semver version",
-			cfg: &config.Config{
-				Images: map[string]*config.ImageConfig{
-					"test": {
-						Name:    "test",
-						Version: "invalid",
-					},
-				},
-			},
-			wantError: true,
-			errCount:  1,
-		},
-		{
-			name: "missing version",
-			cfg: &config.Config{
-				Images: map[string]*config.ImageConfig{
-					"test": {
-						Name:    "test",
-						Version: "",
-					},
-				},
-			},
-			wantError: true,
-			errCount:  1,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			validator := NewValidator(tt.cfg)
-			result := &ValidationResult{
-				Errors: []string{},
-			}
-
-			err := validator.validateSemverCompliance(result)
-			if err != nil {
-				t.Errorf("validateSemverCompliance() returned error: %v", err)
-			}
-
-			if tt.wantError && len(result.Errors) == 0 {
-				t.Error("Expected errors but got none")
-			}
-
-			if !tt.wantError && len(result.Errors) > 0 {
-				t.Errorf("Unexpected errors: %v", result.Errors)
-			}
-
-			if tt.wantError && len(result.Errors) != tt.errCount {
-				t.Errorf("Expected %d errors, got %d", tt.errCount, len(result.Errors))
-			}
-		})
-	}
-}
-
-func TestValidator_proposeVersionUpdate(t *testing.T) {
-	cfg := &config.Config{
-		Images: map[string]*config.ImageConfig{
-			"test": {
-				Name:    "test",
-				Version: "1.2.3",
-			},
-		},
-	}
-
-	validator := NewValidator(cfg)
-	result := &ValidationResult{
-		Errors: []string{},
-	}
-
-	img := cfg.Images["test"]
-
-	t.Run("patch update", func(t *testing.T) {
-		validator.updates = make(map[string]VersionUpdate)
-		validator.proposeVersionUpdate(img, UpdateTypePatch, "test reason", result)
-
-		update, exists := validator.updates["test"]
-		if !exists {
-			t.Fatal("Update not proposed")
-		}
-
-		if update.NewVersion != "1.2.4" {
-			t.Errorf("Expected version 1.2.4, got %s", update.NewVersion)
-		}
-	})
-
-	t.Run("minor update", func(t *testing.T) {
-		validator.updates = make(map[string]VersionUpdate)
-		validator.proposeVersionUpdate(img, UpdateTypeMinor, "test reason", result)
-
-		update, exists := validator.updates["test"]
-		if !exists {
-			t.Fatal("Update not proposed")
-		}
-
-		if update.NewVersion != "1.3.0" {
-			t.Errorf("Expected version 1.3.0, got %s", update.NewVersion)
-		}
-	})
-
-	t.Run("major update", func(t *testing.T) {
-		validator.updates = make(map[string]VersionUpdate)
-		validator.proposeVersionUpdate(img, UpdateTypeMajor, "test reason", result)
-
-		update, exists := validator.updates["test"]
-		if !exists {
-			t.Fatal("Update not proposed")
-		}
-
-		if update.NewVersion != "2.0.0" {
-			t.Errorf("Expected version 2.0.0, got %s", update.NewVersion)
-		}
-	})
-}
-
-func TestValidator_cascadeVersionUpdate(t *testing.T) {
-	cfg := &config.Config{
-		Images: map[string]*config.ImageConfig{
-			"parent": {
-				Name:    "parent",
-				Version: "1.0.0",
-				Images: map[string]*config.ImageConfig{
-					"child": {
-						Name:    "child",
-						Version: "1.0.0",
-						Parent:  "parent",
-					},
-				},
-			},
-		},
-	}
-
-	validator := NewValidator(cfg)
-	validator.buildImageGraph()
-
-	result := &ValidationResult{
-		Errors: []string{},
-	}
-
-	// Propose parent update
-	parent := cfg.Images["parent"]
-	validator.proposeVersionUpdate(parent, UpdateTypePatch, "parent changed", result)
-
-	// Check if child was cascaded
-	if len(validator.updates) != 2 {
-		t.Errorf("Expected 2 updates (parent + child), got %d", len(validator.updates))
-	}
-
-	childUpdate, exists := validator.updates["child"]
-	if !exists {
-		t.Fatal("Child update not cascaded")
-	}
-
-	if childUpdate.NewVersion != "1.0.1" {
-		t.Errorf("Child version should be 1.0.1, got %s", childUpdate.NewVersion)
-	}
-}
-
-func TestValidator_isDockerfileTemplate(t *testing.T) {
-	tests := []struct {
-		name      string
-		path      string
-		sourceDir string
-		want      bool
-	}{
-		{
-			name:      "dockerfile in source dir",
-			path:      "src/Dockerfile.test",
-			sourceDir: "src",
-			want:      true,
-		},
-		{
-			name:      "dockerfile with arch",
-			path:      "src/Dockerfile.test-amd64",
-			sourceDir: "src",
-			want:      true,
-		},
-		{
-			name:      "not a dockerfile",
-			path:      "src/test.txt",
-			sourceDir: "src",
-			want:      false,
-		},
-		{
-			name:      "dockerfile outside source",
-			path:      "other/Dockerfile.test",
-			sourceDir: "src",
-			want:      false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			validator := &Validator{
-				sourceDir: tt.sourceDir,
-			}
-
-			if got := validator.isDockerfileTemplate(tt.path); got != tt.want {
-				t.Errorf("isDockerfileTemplate() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestValidator_getImageNameFromDockerfile(t *testing.T) {
-	tests := []struct {
-		name     string
-		path     string
-		expected string
-	}{
-		{
-			name:     "simple name",
-			path:     "src/Dockerfile.test",
-			expected: "test",
-		},
-		{
-			name:     "with amd64 arch",
-			path:     "src/Dockerfile.test-amd64",
-			expected: "test",
-		},
-		{
-			name:     "with arm64 arch",
-			path:     "src/Dockerfile.test-arm64",
-			expected: "test",
-		},
-		{
-			name:     "hyphenated name",
-			path:     "src/Dockerfile.my-app",
-			expected: "my-app",
-		},
-		{
-			name:     "hyphenated with arch",
-			path:     "src/Dockerfile.my-app-amd64",
-			expected: "my-app",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			validator := &Validator{}
-
-			if got := validator.getImageNameFromDockerfile(tt.path); got != tt.expected {
-				t.Errorf("getImageNameFromDockerfile() = %v, want %v", got, tt.expected)
-			}
-		})
-	}
-}
-
-func TestValidator_ApplyUpdates(t *testing.T) {
-	cfg := &config.Config{
-		Images: map[string]*config.ImageConfig{
-			"test1": {
-				Name:    "test1",
-				Version: "1.0.0",
-			},
-			"test2": {
-				Name:    "test2",
-				Version: "2.0.0",
-			},
-		},
-	}
-
-	updates := map[string]VersionUpdate{
-		"test1": {
-			ImageName:  "test1",
-			OldVersion: "1.0.0",
-			NewVersion: "1.0.1",
-		},
-		"test2": {
-			ImageName:  "test2",
-			OldVersion: "2.0.0",
-			NewVersion: "2.1.0",
-		},
-	}
-
-	validator := NewValidator(cfg)
-
-	err := validator.ApplyUpdates(updates)
+func mustValidate(t *testing.T, cfg *config.Config) *ValidationResult {
+	t.Helper()
+	result, err := NewValidator(cfg).Validate()
 	if err != nil {
-		t.Fatalf("ApplyUpdates() error = %v", err)
+		t.Fatalf("Validate: %v", err)
 	}
+	return result
+}
 
-	if cfg.Images["test1"].Version != "1.0.1" {
-		t.Errorf("test1 version = %s, want 1.0.1", cfg.Images["test1"].Version)
-	}
-
-	if cfg.Images["test2"].Version != "2.1.0" {
-		t.Errorf("test2 version = %s, want 2.1.0", cfg.Images["test2"].Version)
+// fix runs `validate --fix`: validate, then apply.
+func fix(t *testing.T, useCase string) {
+	t.Helper()
+	cfg := examples.LoadRepo(t, useCase)
+	if err := NewValidator(cfg).Apply(mustValidate(t, cfg)); err != nil {
+		t.Fatalf("Apply: %v", err)
 	}
 }
 
-func TestValidator_GetLastModifiedTime(t *testing.T) {
-	// Create temp directory
-	tmpDir, err := os.MkdirTemp("", "validator-test-*")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
+// A changed Dockerfile needs a bump of every image built from it (nodejs22
+// shares Dockerfile.nodejs), cascading to their children only.
+func TestCheck_CascadesToChildren(t *testing.T) {
+	r := examples.Repo(t, "hierarchy")
+	r.Append(examples.Dockerfile("hierarchy", "nodejs"), "RUN echo changed\n")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "hierarchy")),
+		"nodejs 20.0.1→20.0.2", "nodejs22 22.0.0→22.0.1", "frontend 1.0.1→1.0.2", "backend 1.0.1→1.0.2")
+}
 
-	// Create test files
-	dockerfile1 := filepath.Join(tmpDir, "Dockerfile.test")
-	dockerfile2 := filepath.Join(tmpDir, "Dockerfile.test-amd64")
-
-	if err := os.WriteFile(dockerfile1, []byte("FROM test"), 0644); err != nil {
-		t.Fatal(err)
+// A change in an image's Dockerfile folder needs a bump, like a change to its
+// Dockerfile (see config.ChangedImages; the folder cases are covered with
+// --changed-only, which uses the same rule).
+func TestCheck_DockerfileFolderChanged(t *testing.T) {
+	r := examples.Repo(t, "hierarchy", "podman")
+	r.Append("examples/hierarchy/src/frontend/static/index.html", "<p>changed</p>\n")
+	r.Write("examples/hierarchy/src/api/README", "notes\n")
+	result := mustValidate(t, examples.LoadRepo(t, "hierarchy"))
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "hierarchy")), "frontend 1.0.1→1.0.2", "api 1.0.0→1.0.1")
+	if got := result.UpdatesRequired["main/frontend"].Reason; got !=
+		"examples/hierarchy/src/frontend/static/index.html (in its Dockerfile folder) has been modified" {
+		t.Errorf("frontend reason = %q", got)
 	}
-	if err := os.WriteFile(dockerfile2, []byte("FROM test"), 0644); err != nil {
-		t.Fatal(err)
-	}
 
-	validator := &Validator{
-		sourceDir: tmpDir,
-	}
+	// podman bumps minor (version_increment: minor) and keeps the "v" prefix.
+	r.Write("examples/podman/src/app/util.py", "VALUE = 1\n")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "podman")), "app v1.0.0→v1.1.0")
 
-	t.Run("existing image", func(t *testing.T) {
-		modTime, err := validator.GetLastModifiedTime("test")
-		if err != nil {
-			t.Fatalf("GetLastModifiedTime() error = %v", err)
+	// A shared file mentioned by Dockerfile.ubuntu: ubuntu and all its children.
+	r.Git("checkout", "-q", "--", ".")
+	r.Git("clean", "-qfd")
+	r.Append("examples/hierarchy/src/conf/apt.conf", "# changed\n")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "hierarchy")),
+		"ubuntu 22.04.1→22.04.2", "nodejs 20.0.1→20.0.2", "nodejs22 22.0.0→22.0.1",
+		"frontend 1.0.1→1.0.2", "backend 1.0.1→1.0.2", "golang 1.23.6→1.23.7",
+		"worker 1.0.1→1.0.2", "api 1.0.0→1.0.1")
+}
+
+func TestCheck_RootChangeCascadesToAll(t *testing.T) {
+	r := examples.Repo(t, "hierarchy")
+	r.Append(examples.Dockerfile("hierarchy", "ubuntu"), "RUN echo changed\n")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "hierarchy")),
+		"ubuntu 22.04.1→22.04.2", "nodejs 20.0.1→20.0.2", "nodejs22 22.0.0→22.0.1",
+		"frontend 1.0.1→1.0.2", "backend 1.0.1→1.0.2", "golang 1.23.6→1.23.7",
+		"worker 1.0.1→1.0.2", "api 1.0.0→1.0.1")
+}
+
+// Images from a --sources file are checked like the config file's own images.
+func TestCheck_SourcesFilesAreChecked(t *testing.T) {
+	r := examples.Repo(t, "multisource")
+	r.Append(examples.Dockerfile("multisource", "api"), "RUN echo changed\n")      // services.yaml
+	r.Append(examples.Dockerfile("multisource", "web-base"), "RUN echo changed\n") // config.yaml
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "multisource")),
+		"api 1.0.1→1.0.2", "web-base 1.0.1→1.0.2", "site 1.0.1→1.0.2", "admin 1.0.1→1.0.2")
+}
+
+// --fix writes every bump into the file its image is defined in, changing only
+// those version values; afterwards nothing more is requested.
+func TestFix_OnlyVersionValuesChange(t *testing.T) {
+	r := examples.Repo(t, "multisource")
+	r.Append(examples.Dockerfile("multisource", "site"), "RUN echo changed\n")     // config.yaml
+	r.Append(examples.Dockerfile("multisource", "api-base"), "RUN echo changed\n") // services.yaml
+	mainBefore := r.Read("examples/multisource/config.yaml")
+	servicesBefore := r.Read("examples/multisource/services.yaml")
+
+	fix(t, "multisource")
+
+	wantOnlyVersionsChanged(t, mainBefore, r.Read("examples/multisource/config.yaml"),
+		"site:", "1.0.2")
+	wantOnlyVersionsChanged(t, servicesBefore, r.Read("examples/multisource/services.yaml"),
+		"api-base:", "1.0.2", "api:", "1.0.2", "worker:", "1.0.2")
+
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "multisource")))
+}
+
+// wantOnlyVersionsChanged checks after differs from before only in `version:`
+// lines, exactly the expected ones: pairs of (the image key on the line above,
+// the new version).
+func wantOnlyVersionsChanged(t *testing.T, before, after string, pairs ...string) {
+	t.Helper()
+	b, a := strings.Split(before, "\n"), strings.Split(after, "\n")
+	if len(a) != len(b) {
+		t.Fatalf("line count changed: %d → %d", len(b), len(a))
+	}
+	var changed []string
+	for i := range b {
+		if a[i] == b[i] {
+			continue
 		}
-		if modTime.IsZero() {
-			t.Error("Expected non-zero modification time")
+		if !strings.HasPrefix(strings.TrimSpace(b[i]), "version:") || i == 0 {
+			t.Errorf("non-version line changed:\n- %s\n+ %s", b[i], a[i])
+			continue
+		}
+		key := strings.Fields(b[i-1])[0]
+		changed = append(changed, key+" "+strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(a[i]), "version:")))
+	}
+	var want []string
+	for i := 0; i+1 < len(pairs); i += 2 {
+		want = append(want, pairs[i]+" "+pairs[i+1])
+	}
+	if !slices.Equal(changed, want) {
+		t.Errorf("changed versions = %q, want %q", changed, want)
+	}
+}
+
+// Dockerfile changed in the first commit of a two-commit branch, never bumped.
+func TestCheck_TwoCommitBranch_ChangeInFirstCommit(t *testing.T) {
+	r := examples.Repo(t, "minimal")
+	r.Append(examples.Dockerfile("minimal", "app"), "RUN echo changed\n")
+	r.Commit("change app")
+	r.Write("NOTES", "unrelated\n")
+	r.Commit("unrelated")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")), "app 1.0.1→1.0.2")
+}
+
+// Bump in the first commit, Dockerfile edit in the second: already bumped.
+func TestCheck_TwoCommitBranch_BumpThenEdit(t *testing.T) {
+	r := examples.Repo(t, "minimal")
+	if err := config.UpdateVersions("examples/minimal/config.yaml", map[string]string{"app": "1.0.2"}); err != nil {
+		t.Fatal(err)
+	}
+	r.Commit("bump app")
+	r.Append(examples.Dockerfile("minimal", "app"), "RUN echo changed\n")
+	r.Commit("change app")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")))
+}
+
+func TestCheck_NewImageNeedsNoBump(t *testing.T) {
+	r := examples.Repo(t, "minimal")
+	r.Append("examples/minimal/config.yaml", "      extra:\n        version: 1.0.0\n")
+	r.Write(examples.Dockerfile("minimal", "extra"), "ARG BASE\nFROM ${BASE}\n")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")))
+}
+
+// On master after a merge, the default (no base_ref) checks the last commit:
+// the merged branch bumped its versions, so nothing is requested; an unbumped
+// change committed directly on master is.
+func TestCheck_DefaultBranchAfterMerge(t *testing.T) {
+	r := examples.Repo(t, "minimal")
+	r.Append(examples.Dockerfile("minimal", "app"), "RUN echo changed\n")
+	fix(t, "minimal")
+	r.Commit("change and bump app")
+	r.Git("checkout", "-q", "master")
+	r.Git("merge", "-q", "--no-ff", "feature", "-m", "merge feature")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")))
+
+	r.Append(examples.Dockerfile("minimal", "app"), "RUN echo hotfix\n")
+	r.Commit("hotfix without bump")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")), "app 1.0.2→1.0.3")
+}
+
+// On master, uncommitted changes are what is checked.
+func TestCheck_DefaultBranchUncommitted(t *testing.T) {
+	r := examples.Repo(t, "minimal")
+	r.Git("checkout", "-q", "master")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")))
+	r.Append(examples.Dockerfile("minimal", "base"), "RUN echo changed\n")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")), "base 1.0.1→1.0.2", "app 1.0.1→1.0.2")
+}
+
+// Default base ref: master, else main; neither → error until base_ref is set.
+func TestCheck_BaseRefResolution(t *testing.T) {
+	t.Run("main", func(t *testing.T) {
+		r := testutil.NewRepo(t, "main")
+		examples.CopyToRepo(r, "minimal")
+		r.Commit("init")
+		r.Git("checkout", "-q", "-b", "feature")
+		r.Append(examples.Dockerfile("minimal", "app"), "RUN echo changed\n")
+		wantBumps(t, bumps(t, examples.LoadRepo(t, "minimal")), "app 1.0.1→1.0.2")
+	})
+	t.Run("neither", func(t *testing.T) {
+		r := testutil.NewRepo(t, "develop")
+		examples.CopyToRepo(r, "minimal")
+		r.Commit("init")
+		r.Git("checkout", "-q", "-b", "feature")
+		cfg := examples.LoadRepo(t, "minimal")
+		if _, err := NewValidator(cfg).Validate(); err == nil || !strings.Contains(err.Error(), "base ref not found") {
+			t.Fatalf("Validate() = %v, want a 'base ref not found' error", err)
+		}
+		cfg.Config.BaseRef = "develop"
+		wantBumps(t, bumps(t, cfg))
+	})
+	t.Run("unknown", func(t *testing.T) {
+		examples.Repo(t, "minimal")
+		cfg := examples.LoadRepo(t, "minimal")
+		cfg.Config.BaseRef = "nope"
+		if _, err := NewValidator(cfg).Validate(); err == nil || !strings.Contains(err.Error(), `base ref "nope" not found`) {
+			t.Fatalf("Validate() = %v, want a `base ref \"nope\" not found` error", err)
 		}
 	})
+}
 
-	t.Run("non-existing image", func(t *testing.T) {
-		_, err := validator.GetLastModifiedTime("nonexistent")
-		if err == nil {
-			t.Error("Expected error for non-existent image")
-		}
+// The podman example sets version_increment: minor; the bump cascades as minor.
+func TestCheck_MinorIncrement(t *testing.T) {
+	r := examples.Repo(t, "podman")
+	r.Append(examples.Dockerfile("podman", "python"), "RUN echo changed\n")
+	wantBumps(t, bumps(t, examples.LoadRepo(t, "podman")), "python 3.12.0→3.13.0", "app v1.0.0→v1.1.0")
+}
+
+// Check is the plan/build gate: an error listing the bumps, nil when consistent.
+func TestCheck_Gate(t *testing.T) {
+	r := examples.Repo(t, "minimal")
+	if err := NewValidator(examples.LoadRepo(t, "minimal")).Check(); err != nil {
+		t.Fatalf("Check() = %v, want nil", err)
+	}
+	r.Append(examples.Dockerfile("minimal", "app"), "RUN echo changed\n")
+	err := NewValidator(examples.LoadRepo(t, "minimal")).Check()
+	if err == nil || !strings.Contains(err.Error(), "app: 1.0.1 → 1.0.2") ||
+		!strings.Contains(err.Error(), "arbor validate --fix") {
+		t.Fatalf("Check() = %v, want the app bump and a pointer to `arbor validate --fix`", err)
+	}
+}
+
+func TestCheck_InvalidVersion(t *testing.T) {
+	cfg := examples.Files(t, map[string]string{
+		"config.yaml": "images:\n  app:\n    version: not-a-version\n    base_image: alpine:3.18\n",
 	})
+	err := NewValidator(cfg).Check()
+	if err == nil || !strings.Contains(err.Error(), "invalid version") {
+		t.Fatalf("Check() = %v, want an invalid version error", err)
+	}
 }
